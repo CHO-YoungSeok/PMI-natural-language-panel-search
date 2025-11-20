@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>중앙 프롬프트 + 결과 개선</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <style>
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background: #fcfdfa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      font-family: 'Segoe UI', Arial, sans-serif;
+    }
+    .center-wrap {
+      width: 100vw;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 70px 0 0 0;
+    }
+    .prompt-bar {
+      width: 95vw;
+      max-width: 650px;
+      background: #fff;
+      border-radius: 18px;
+      box-shadow: 0 2px 16px #e6e6e9;
+      border: 1px solid #e5e6ee;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      transition: box-shadow 0.2s;
+      margin-bottom: 24px;
+    }
+    .prompt-row {
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      gap: 7px;
+    }
+    .prompt-input {
+      flex: 1 1 0px;
+      border: none;
+      outline: none;
+      font-size: 17px;
+      padding: 22px 0;
+      background: transparent;
+      color: #2d355c;
+    }
+    .prompt-input::placeholder {
+      color: #b7bcc7;
+      font-size: 16px;
+    }
+    .prompt-btn {
+      border: none;
+      background: #e6f1ff;
+      color: #3681eb;
+      border-radius: 10px;
+      width: 44px;
+      height: 44px;
+      font-size: 18px;
+      margin: 0 2px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      outline: none;
+      transition: background 0.13s;
+    }
+    .prompt-btn:hover {
+      background: #dceaff;
+    }
+    .shortcut-icons {
+      margin-left: 8px;
+      display: flex; gap: 5px;
+    }
+    .shortcut-icons .icon {
+      font-size: 18px;
+      background: #f3f6fa;
+      border-radius: 7px;
+      padding: 5px 7px;
+      color: #b1b9cd;
+      margin-right: 2px;
+      border: none;
+      outline: none;
+      cursor: pointer;
+    }
+    .result-area {
+      width: 95vw;
+      max-width: 650px;
+      margin: 0 auto;
+      margin-bottom: 50px;
+    }
+    .summary-card {
+      background: #f8fbff;
+      border-radius: 12px;
+      padding: 17px 19px;
+      margin-bottom: 14px;
+      border: 1px solid #e0ebfc;
+      color: #133d8e;
+      font-size: 15px;
+    }
+    .result-list {
+      display: flex;
+      flex-direction: column;
+      gap: 13px;
+    }
+    .result-card {
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px 18px 12px 18px;
+      box-shadow: 0 2px 10px #ececf7;
+      font-size: 15px;
+      color: #193265;
+      border: 1px solid #ececf4;
+      transition: box-shadow 0.17s;
+      margin-bottom: 0;
+    }
+    .result-id {
+      font-family: 'Menlo', 'Consolas', monospace;
+      font-size: 13px;
+      color: #94aad5;
+      margin-bottom: 4px;
+    }
+    .result-info {
+      margin-bottom: 8px;
+      white-space: pre-line;
+      word-break: break-all;
+    }
+    .meta {
+      font-size: 12px;
+      color: #b8bed7;
+      margin-top: 10px;
+    }
+    @media (max-width: 600px) {
+      .center-wrap { padding-top: 32px;}
+      .prompt-bar, .result-area { max-width: 98vw; }
+    }
+  </style>
+</head>
+<body>
+<div class="center-wrap">
+  <form id="promptForm" class="prompt-bar">
+    <div class="prompt-row">
+      <input id="promptInput" class="prompt-input" autocomplete="off"
+        placeholder="Ask anything. Type @ for mentions and / for shortcuts." />
+      <button type="submit" class="prompt-btn" aria-label="검색">
+        🔍
+      </button>
+      <span class="shortcut-icons">
+        <button type="button" class="icon" title="단축키"><span>⚡️</span></button>
+        <button type="button" class="icon" title="힌트"><span>💡</span></button>
+      </span>
+    </div>
+  </form>
+  <section id="resultArea" class="result-area">
+    <!-- 요약 카드와 결과 카드가 여기에 렌더링됨 -->
+  </section>
+</div>
+<script>
+const API_URL = "http://3.26.24.241:8000/ask";
+const promptForm = document.getElementById("promptForm");
+const promptInput = document.getElementById("promptInput");
+const resultArea = document.getElementById("resultArea");
+
+let loadingCard = null;
+
+function renderLoading() {
+  loadingCard = document.createElement("div");
+  loadingCard.className = "result-card";
+  loadingCard.innerHTML = "🔍 검색 및 LLM 답변 생성 중...";
+  resultArea.appendChild(loadingCard);
+}
+function removeLoading() {
+  if (loadingCard) {
+    resultArea.removeChild(loadingCard);
+    loadingCard = null;
+  }
+}
+
+// 결과 렌더 함수
+function renderResult(data) {
+  // 기존 결과 리셋
+  resultArea.innerHTML = "";
+
+  // summary 영역
+  const summaryCard = document.createElement("div");
+  summaryCard.className = "summary-card";
+  summaryCard.innerHTML = `
+    <b>질문(original):</b> ${data.original_query || "-"}<br>
+    <b>질문(정제됨):</b> ${data.clean_query || "-"}
+    <div class="meta">
+      ⏱ 소요 시간: ${data.metrics?.total_time || '-'} /
+      문서 수: ${data.metrics?.final_count || '-'}
+    </div>
+  `;
+  resultArea.appendChild(summaryCard);
+
+  // result list
+  const resultList = document.createElement("div");
+  resultList.className = "result-list";
+  if (Array.isArray(data.result) && data.result.length > 0) {
+    data.result.forEach(item => {
+      const card = document.createElement("div");
+      card.className = "result-card";
+      card.innerHTML = `
+        <div class="result-id"><b>ID:</b> ${item.id || "-"}</div>
+        <div class="result-info">${item.info_text || "(결과 없음)"}</div>
+      `;
+      resultList.appendChild(card);
+    });
+  } else {
+    const card = document.createElement("div");
+    card.className = "result-card";
+    card.innerHTML = "🔔 검색 결과가 없습니다.";
+    resultList.appendChild(card);
+  }
+  resultArea.appendChild(resultList);
+}
+
+promptForm.addEventListener("submit", async function (e) {
+  e.preventDefault();
+  const question = promptInput.value.trim();
+  if (!question) return;
+  renderLoading();
+  promptInput.value = "";
+  promptInput.disabled = true;
+  try {
+    const response = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ query: question, target_table: "wellcome1st" })
+    });
+    const data = await response.json();
+    removeLoading();
+    renderResult(data);
+    resultArea.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    removeLoading();
+    const card = document.createElement("div");
+    card.className = "result-card";
+    card.innerHTML = `❌ 검색 실패<br><span style="font-size:13px;color:#d30;">${error.message}</span>`;
+    resultArea.appendChild(card);
+  }
+  promptInput.disabled = false;
+  promptInput.focus();
+});
+// 엔터키로도 전송
+promptInput.addEventListener('keydown', function (e){
+  if (e.key==="Enter" && !e.shiftKey) {
+    e.preventDefault();
+    promptForm.dispatchEvent(new Event('submit'));
+  }
+});
+</script>
+</body>
+</html>
