@@ -3,6 +3,10 @@ import numpy as np
 import os
 from typing import List, Dict
 from pgvector.psycopg2 import register_vector
+from dotenv import load_dotenv
+
+# 프로젝트 .env에 설정한 환경변수들 활성화
+load_dotenv()
 
 DB_CONFIG = {
     'host': 'database-1.cpk06802so7a.ap-southeast-2.rds.amazonaws.com',

@@ -5,23 +5,23 @@ def get_sonnet_client():
     client = AnthropicBedrock(aws_region="ap-southeast-2")
     return client
 
+
 def preprocess_query(query: str) -> str:
     """
     Claude Sonnet을 사용해 '깔끔문장' 생성
     """
     client = get_sonnet_client()
     
-    system_prompt = """당신은 사용자의 입력 쿼리를 전문적으로 다듬는 AI 어시스턴트입니다.
-다음 규칙을 엄격히 따르세요:
-1. 한국어로 생성할 것
-2. 오타와 문법 오류를 수정할 것
-3. 패널을 특정할 수 있는 명확하고 구체적인 문장으로 변환할 것
-4. 불필요한 말을 제거하고 핵심 의도만 간결하게 표현할 것
-5. 원본 쿼리의 의미를 변경하지 말 것"""
+    system_prompt = """당신은 검색 쿼리 전처리 전문가입니다. 
+사용자가 입력한 질문을 분석하여 다음 작업을 수행하세요:
+1. 오타 및 맞춤법 오류 수정
+2. 불필요한 조사나 표현 제거
+3. 명확하고 간결한 검색용 문장으로 변환
+4. 핵심 의도는 유지하되 검색에 최적화된 형태로 재구성
+***반드시 전처리된 문장만 출력하세요. 추가 설명은 하지 마세요.** *
+"""
     
-    user_prompt = f"""다음 쿼리를 깔끔하고 명확한 문장으로 변환해주세요:
-원본 쿼리: {query}
-변환된 문장만 출력하세요. 추가 설명은 불필요합니다."""
+    user_prompt = f"""다음 쿼리를 전처리하세요.: 원본 쿼리: {query} """
     
     message = client.messages.create(
         model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
