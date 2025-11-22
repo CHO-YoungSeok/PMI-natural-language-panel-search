@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import sys, os, time, re, json
 from fastapi.middleware.cors import CORSMiddleware
-from db_search import fts_search, vector_search, get_jsons_by_ids
+from db_search import fts_search, vector_search, bm25_search, get_jsons_by_ids
 from sonnet_api import preprocess_query, llm_filter_panel
 from rrf_logic import rrf_rank
 from query_vectorizer import get_query_vector
@@ -29,10 +29,12 @@ class QueryItem(BaseModel):
 @app.post("/ask")
 def search_pipeline(item: QueryItem):
     """
-    1. Sonnet으로 쿼리 전처리(깔끔문장)
-    2. fts, 벡터 검색 각각 top_k 추출
-    3. RRF 융합
-    4. Sonnet으로 패널 필터링
+    하이브리드 검색 파이프라인 (BM25 + Vector Search + RRF)
+
+    1. Sonnet으로 쿼리 전처리 (깔끔문장)
+    2. FTS(Python BM25 with 한국어 형태소 분석), 벡터 검색 각각 top_k 추출
+    3. RRF 융합으로 두 검색 결과 통합
+    4. Sonnet으로 최종 패널 필터링
     5. JSON 반환
     """
     t0 = time.time()
@@ -40,13 +42,13 @@ def search_pipeline(item: QueryItem):
     clean_query = preprocess_query(item.query)
     print(f"clean query: {clean_query}")
 
-    # 2. postgreSQL의 Full Text Search(FTS), 벡터 코사인 유사도 검색
+    # 2. FTS (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
     fts_results = fts_search(clean_query, top_k=item.count)
     print("----------------------------------------------")
-    print("fts_result")
+    print("fts_result (BM25 기반)")
     print(fts_results)
 
-    query_vec = get_query_vector(clean_query) 
+    query_vec = get_query_vector(clean_query)
     vector_results = vector_search(query_vec, top_k=item.count)
     print("----------------------------------------------")
     print("query_vec 변환 완료")
@@ -55,8 +57,7 @@ def search_pipeline(item: QueryItem):
     # id 기준으로 결과 통합
     # 성능 개선: 순위를 딕셔너리로 미리 매핑 (O(1) lookup)
 
-    # fts_ids = fts_results
-    fts_ids = vector_results
+    fts_ids = fts_results
     vector_ids = vector_results
     fts_rank_map = {id_: rank + 1 for rank, id_ in enumerate(fts_ids)}
     vector_rank_map = {id_: rank + 1 for rank, id_ in enumerate(vector_ids)}
@@ -71,7 +72,7 @@ def search_pipeline(item: QueryItem):
         # 딕셔너리 lookup으로 순위 가져오기 (O(1))
         fts_rank = fts_rank_map.get(id_, len(fts_ids) + 1)
         vector_rank = vector_rank_map.get(id_, len(vector_ids) + 1)
-        
+
         # 표준 RRF 공식: 1/(k + rank)
         rrf_score = (1.0 / (k + fts_rank)) + (1.0 / (k + vector_rank))
         
