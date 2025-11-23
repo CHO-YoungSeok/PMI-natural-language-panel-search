@@ -43,13 +43,13 @@ def search_pipeline(item: QueryItem):
     print(f"clean query: {clean_query}")
 
     # 2. FTS (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
-    fts_results = fts_search(clean_query, top_k=item.count)
+    fts_results = fts_search(clean_query, top_k=item.count * 10)
     print("----------------------------------------------")
     print("fts_result (BM25 기반)")
     print(fts_results)
 
     query_vec = get_query_vector(clean_query)
-    vector_results = vector_search(query_vec, top_k=item.count)
+    vector_results = vector_search(query_vec, top_k=item.count * 10)
     print("----------------------------------------------")
     print("query_vec 변환 완료")
 
@@ -83,7 +83,7 @@ def search_pipeline(item: QueryItem):
 
     # RRF 점수 기준 정렬 (높은 점수 우선)
     rrf_sorted = sorted(rrf_input, key=lambda x: x["rrf_score"], reverse=True)
-    top_panels = rrf_sorted[:min(item.count * 2, len(rrf_sorted))]
+    top_panels = rrf_sorted[:min(item.count, len(rrf_sorted))]
     # for p in top_panels :
     #     print(p["id"])
 
