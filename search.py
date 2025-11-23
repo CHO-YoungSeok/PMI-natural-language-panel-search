@@ -43,13 +43,13 @@ def search_pipeline(item: QueryItem):
     print(f"clean query: {clean_query}")
 
     # 2. (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
-    bm25_results_ids = bm25_search(clean_query, top_k=3600)
+    bm25_results_ids = bm25_search(clean_query, top_k=36000)
     print("----------------------------------------------")
     print(f"bm25_result (BM25 기반) 완료: {len(bm25_results_ids)}개")
     print(get_jsons_by_ids(bm25_results_ids[:3]))
 
     query_vec = get_query_vector(clean_query)
-    vector_results_ids = vector_search(query_vec, top_k=3600)
+    vector_results_ids = vector_search(query_vec, top_k=36000)
     print("----------------------------------------------")
     print(f"query_vec 기반 완료 : {len(vector_results_ids)}개")
     print(get_jsons_by_ids(vector_results_ids[:3]))

@@ -249,6 +249,7 @@ promptForm.addEventListener("submit", async function (e) {
   promptInput.disabled = false;
   promptInput.focus();
 });
+
 // 엔터키로도 전송
 promptInput.addEventListener('keydown', function (e){
   if (e.key==="Enter" && !e.shiftKey) {
