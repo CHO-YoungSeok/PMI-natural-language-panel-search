@@ -40,7 +40,7 @@ except ImportError:
     sys.exit(1)
 
 
-def build_bm25_index(batch_size=5000) -> Tuple:
+def build_bm25_index(batch_size==100) -> Tuple:
     """
     데이터베이스에서 배치 단위로 문서를 읽어 BM25 인덱스 구축 (메모리 효율적)
 

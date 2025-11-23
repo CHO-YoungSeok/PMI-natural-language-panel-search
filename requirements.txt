@@ -6,8 +6,7 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 
 # Database
-psycopg2-binary==2.9.9
-pgvector==0.2.4
+## aws RDS postgreSQL 활용
 
 # Machine Learning & NLP
 sentence-transformers==2.2.2
