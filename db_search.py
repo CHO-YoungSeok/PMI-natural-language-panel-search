@@ -99,7 +99,7 @@ def preprocess_text(text: str) -> List[str]:
     return filtered_tokens
 
 
-def fts_search(query: str, top_k: int = 100) -> List[str]:
+def bm25_search(query: str, top_k: int = 100) -> List[str]:
     """
     BM25 기반 검색 (전처리 강화, 캐시 사용)
 
@@ -145,11 +145,11 @@ def fts_search(query: str, top_k: int = 100) -> List[str]:
 
     results = [doc_ids[i] for i in top_indices]
 
-    # 디버깅용: 상위 3개 점수 출력
-    print(f"\n상위 3개 결과:")
-    for i in range(min(3, len(top_indices))):
-        idx = top_indices[i]
-        print(f"  {i+1}. ID: {doc_ids[idx]}, Score: {scores[idx]:.4f}")
+    # # 디버깅용: 상위 3개 점수 출력
+    # print(f"\n상위 3개 결과:")
+    # for i in range(min(3, len(top_indices))):
+    #     idx = top_indices[i]
+    #     print(f"  {i+1}. ID: {doc_ids[idx]}, Score: {scores[idx]:.4f}")
 
     return results
 

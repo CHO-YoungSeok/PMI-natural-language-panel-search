@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import sys, os, time, re, json
 from fastapi.middleware.cors import CORSMiddleware
-from db_search import fts_search, vector_search, get_jsons_by_ids
+from db_search import bm25_search, vector_search, get_jsons_by_ids
 from sonnet_api import preprocess_query, llm_filter_panel
 from rrf_logic import rrf_rank
 from query_vectorizer import get_query_vector
@@ -24,7 +24,7 @@ app.add_middleware(
 
 class QueryItem(BaseModel):
     query: str
-    count: int = 300
+    count: int = 150
 
 @app.post("/ask")
 def search_pipeline(item: QueryItem):
@@ -32,7 +32,7 @@ def search_pipeline(item: QueryItem):
     하이브리드 검색 파이프라인 (BM25 + Vector Search + RRF)
 
     1. Sonnet으로 쿼리 전처리 (깔끔문장)
-    2. FTS(Python BM25 with 한국어 형태소 분석), 벡터 검색 각각 top_k 추출
+    2. (Python BM25 with 한국어 형태소 분석), 벡터 검색 각각 top_k 추출
     3. RRF 융합으로 두 검색 결과 통합
     4. Sonnet으로 최종 패널 필터링
     5. JSON 반환
@@ -42,39 +42,41 @@ def search_pipeline(item: QueryItem):
     clean_query = preprocess_query(item.query)
     print(f"clean query: {clean_query}")
 
-    # 2. FTS (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
-    fts_results = fts_search(clean_query, top_k=item.count * 10)
+    # 2. (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
+    bm25_results_ids = bm25_search(clean_query, top_k=3600)
     print("----------------------------------------------")
-    print("fts_result (BM25 기반)")
-    print(fts_results)
+    print(f"bm25_result (BM25 기반) 완료: {len(bm25_results_ids)}개")
+    print(get_jsons_by_ids(bm25_results_ids[:3]))
 
     query_vec = get_query_vector(clean_query)
-    vector_results = vector_search(query_vec, top_k=item.count * 10)
+    vector_results_ids = vector_search(query_vec, top_k=3600)
     print("----------------------------------------------")
-    print("query_vec 변환 완료")
+    print(f"query_vec 기반 완료 : {len(vector_results_ids)}개")
+    print(get_jsons_by_ids(vector_results_ids[:3]))
 
     # 3. RRF 융합
     # id 기준으로 결과 통합
     # 성능 개선: 순위를 딕셔너리로 미리 매핑 (O(1) lookup)
-
-    fts_ids = fts_results
-    vector_ids = vector_results
-    fts_rank_map = {id_: rank + 1 for rank, id_ in enumerate(fts_ids)}
+    bm25_ids = bm25_results_ids
+    vector_ids = vector_results_ids
+    bm25_rank_map = {id_: rank + 1 for rank, id_ in enumerate(bm25_ids)}
     vector_rank_map = {id_: rank + 1 for rank, id_ in enumerate(vector_ids)}
 
-    all_ids = list(set(fts_ids + vector_ids))
+    all_ids = list(set(bm25_ids + vector_ids))
+    print("----------------------------------------------")
+    print(f"rrf ALL list set : {len(all_ids)}개")
 
     # RRF 점수 계산
     rrf_input = []
-    k = 60  # RRF 상수 (표준값)
+    k = 40  # RRF 상수 (표준값)
 
     for id_ in all_ids:
         # 딕셔너리 lookup으로 순위 가져오기 (O(1))
-        fts_rank = fts_rank_map.get(id_, len(fts_ids) + 1)
+        bm25_rank = bm25_rank_map.get(id_, len(bm25_ids) + 1)
         vector_rank = vector_rank_map.get(id_, len(vector_ids) + 1)
 
         # 표준 RRF 공식: 1/(k + rank)
-        rrf_score = (1.0 / (k + fts_rank)) + (1.0 / (k + vector_rank))
+        rrf_score = (1.0 / (k + bm25_rank)) + (1.0 / (k + vector_rank))
         
         rrf_input.append({
             "id": id_, 
@@ -84,8 +86,9 @@ def search_pipeline(item: QueryItem):
     # RRF 점수 기준 정렬 (높은 점수 우선)
     rrf_sorted = sorted(rrf_input, key=lambda x: x["rrf_score"], reverse=True)
     top_panels = rrf_sorted[:min(item.count, len(rrf_sorted))]
-    # for p in top_panels :
-    #     print(p["id"])
+    print("----------------------------------------------")
+    print(f"rrf 완료 : {len(top_panels)}개")
+    print(get_jsons_by_ids([panel['id'] for panel in top_panels[:3]]))
 
     # 4. Sonnet으로 패널 필터링
     ## json_data_table에서 패널별 json데이터를 sonnet에 함께 넘긴다. 반환 값은 id만 받고, 
@@ -96,8 +99,11 @@ def search_pipeline(item: QueryItem):
 
     final_ids = llm_filter_panel(clean_query, panel_jsons).strip().split(' ')
     answers = get_jsons_by_ids(final_ids)
-    for p in answers :
-        print(p)
+
+    # 결과 콘솔에 출력
+    print("----------------------------------------------")
+    print(f"최종 검색 결과 : {len(answers)}개")
+    print(answers)
 
     # 5. 클라이언트에게 결과 반환
     t1 = time.time()
@@ -111,10 +117,8 @@ def search_pipeline(item: QueryItem):
         }
     }
     
-    # 결과 콘솔에 출력
-    for p in answers :
-        print(f"{p.id} : {p.info_text}")
-    print(len(p))
+
+
 
 @app.get("/")
 def root():
