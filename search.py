@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import sys, os, time, re, json
 from fastapi.middleware.cors import CORSMiddleware
-from db_search import fts_search, vector_search, bm25_search, get_jsons_by_ids
+from db_search import fts_search, vector_search, get_jsons_by_ids
 from sonnet_api import preprocess_query, llm_filter_panel
 from rrf_logic import rrf_rank
 from query_vectorizer import get_query_vector

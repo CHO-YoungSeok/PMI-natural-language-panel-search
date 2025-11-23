@@ -11,7 +11,7 @@ pydantic==2.5.0
 # Machine Learning & NLP
 sentence-transformers==2.2.2
 numpy==1.24.3
-torch==2.1.0
+torch==2.3.0
 
 # Korean NLP
 kiwipiepy==0.16.2
