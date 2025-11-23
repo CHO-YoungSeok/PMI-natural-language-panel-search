@@ -1,18 +1,29 @@
-import anthropic, os, json
-from anthropic import AnthropicBedrock
+import os
+from dotenv import load_dotenv
+from google import genai
 
-def get_sonnet_client():
-    client = AnthropicBedrock(aws_region="ap-southeast-2")
+# .env 파일 로드
+load_dotenv()
+
+def get_gemini_client():
+    """
+    Gemini API 클라이언트를 반환
+    """
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.")
+
+    client = genai.Client(api_key=api_key)
     return client
 
 
 def preprocess_query(query: str) -> str:
     """
-    Claude Sonnet을 사용해 '깔끔문장' 생성
+    Gemini를 사용해 '깔끔문장' 생성
     """
-    client = get_sonnet_client()
-    
-    system_prompt = """당신은 검색 쿼리 전처리 전문가입니다. 
+    client = get_gemini_client()
+
+    system_prompt = """당신은 검색 쿼리 전처리 전문가입니다.
 사용자가 입력한 질문을 분석하여 다음 작업을 수행하세요:
 1. 오타 및 맞춤법 오류 수정
 2. 불필요한 조사나 표현 제거
@@ -20,37 +31,33 @@ def preprocess_query(query: str) -> str:
 4. 핵심 의도는 유지하되 검색에 최적화된 형태로 재구성
 ***반드시 전처리된 문장만 출력하세요. 추가 설명은 하지 마세요.** *
 """
-    
+
     user_prompt = f"""다음 쿼리를 전처리하세요.: 원본 쿼리: {query} """
-    
-    message = client.messages.create(
-        model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        max_tokens=1024,
-        system=system_prompt,  # system 파라미터로 전달
-        messages=[
-            {"role": "user", "content": user_prompt}  # user_prompt 사용
-        ]
+
+    response = client.models.generate_content(
+        model='gemini-2.0-flash-exp',
+        contents=f"{system_prompt}\n\n{user_prompt}"
     )
-    
-    return message.content[0].text.strip()
+
+    return response.text.strip()
 
 
 def llm_filter_panel(query: str, jsons: list) -> list:
     """
-    Sonnet을 사용해서 최종 패널 필터링 및 랭킹
-    
+    Gemini를 사용해서 최종 패널 필터링 및 랭킹
+
     Args:
         query: 사용자 검색 쿼리
         jsons: [{"id": "...", "info": {...}}, ...] 형식의 후보 패널 리스트
-    
+
     Returns:
         필터링되고 랭킹된 패널 리스트 (각 패널의 id를 ' '(공백)로 구분한다)
-    """    
+    """
     if not jsons:
         return []
 
-    client = get_sonnet_client()
-    
+    client = get_gemini_client()
+
     system_prompt = """
 당신은 사용자의 검색 쿼리에 가장 잘 맞는 패널을 선별하는 AI 어시스턴트입니다.
 사용자의 검색 의도를 정확히 파악하고, 가장 관련성 높은 패널의 id를 골라내는 것이 당신의 임무입니다.
@@ -72,7 +79,7 @@ def llm_filter_panel(query: str, jsons: list) -> list:
 - value가 문자열, 리스트, 혹은 또 다른 객체일 수 있으며, 이 값들을 자연어로 읽고 해석해라.
 - 검색 쿼리와 가장 관련성이 높은 패널 순으로 정렬해 반환하라.
 
-# 조건 기반 점수 규칙 
+# 조건 기반 점수 규칙
 - 사용자의 검색 쿼리는 여러 개의 "조건"(예: 지역, 연령, 성별, 행동/경험 등)으로 이루어져 있다고 가정하라.
 - 먼저 쿼리에서 이러한 조건들을 스스로 추출하라.
 - 각 후보 패널에 대해 info 내부의 모든 key와 value를 읽고, 각 조건에 대해 다음 기준으로 판단하라.
@@ -99,16 +106,11 @@ def llm_filter_panel(query: str, jsons: list) -> list:
     user_prompt = f"""## 검색 쿼리 : ###{query} 에 가장 부합###하는 패널들을 상위로 선별하세요.
     후보 패널 : {jsons}
     """
-    
 
-    message = client.messages.create(
-        model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        max_tokens=1024,
-        system=system_prompt,  # system 파라미터로 전달
-        messages=[
-            {"role": "user", "content": user_prompt}  # user_prompt 사용
-        ]
+
+    response = client.models.generate_content(
+        model='gemini-2.0-flash-exp',
+        contents=f"{system_prompt}\n\n{user_prompt}"
     )
-    
-    return message.content[0].text.strip()
 
+    return response.text.strip()
