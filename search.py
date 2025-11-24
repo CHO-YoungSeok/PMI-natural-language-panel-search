@@ -4,11 +4,13 @@ from pydantic import BaseModel
 import sys, os, time, re, json
 from fastapi.middleware.cors import CORSMiddleware
 from db_search import bm25_search, vector_search, get_jsons_by_ids
-from sonnet_api import preprocess_query, llm_filter_panel
-from rrf_logic import rrf_rank
+from sonnet_api import preprocess_query, llm_filter_panel, extract_result_count
 from query_vectorizer import get_query_vector
 import numpy as np
 from dotenv import load_dotenv
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # 프로젝트 .env에 설정한 환경변수들 활성화
 load_dotenv()
@@ -24,7 +26,7 @@ app.add_middleware(
 
 class QueryItem(BaseModel):
     query: str
-    count: int = 150
+    count: int = 250 #RRF를 통해 산출할 개수 =>  llm_filter 입력 개수
 
 @app.post("/ask")
 def search_pipeline(item: QueryItem):
@@ -37,19 +39,36 @@ def search_pipeline(item: QueryItem):
     4. Sonnet으로 최종 패널 필터링
     5. JSON 반환
     """
+    kst_time = datetime.now(ZoneInfo("Asia/Seoul"))
+
+    print("========================================")
+    print(f"{kst_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} : 검색 시작")
+    print("========================================")
+
     t0 = time.time()
     # 1. Sonnet 전처리
     clean_query = preprocess_query(item.query)
-    print(f"clean query: {clean_query}")
+    print(f"{time.time() - t0:.1}s, clean query: {clean_query}")
 
+    t00 = time.time()
+    # 1.5 요구된 반환 결과 개수 추출
+    try:
+        result_count = int(extract_result_count(clean_query))
+        print(f"{time.time() - t00:.1}s, result count: {result_count}")
+    except (ValueError, TypeError):        
+        result_count = 30  # 기본값 설정
+        print(f"Warning: result_count가 정수로 변환할 수 없습니다. 기본값 사용 {result_count}")
+
+
+    t01 = time.time()
     # 2. (Python BM25 with 한국어 형태소 분석), 벡터 코사인 유사도 검색
-    bm25_results_ids = bm25_search(clean_query, top_k=36000)
+    bm25_results_ids = bm25_search(clean_query, top_k=30000)
     print("----------------------------------------------")
     print(f"bm25_result (BM25 기반) 완료: {len(bm25_results_ids)}개")
     print(get_jsons_by_ids(bm25_results_ids[:3]))
 
     query_vec = get_query_vector(clean_query)
-    vector_results_ids = vector_search(query_vec, top_k=36000)
+    vector_results_ids = vector_search(query_vec, top_k=30000)
     print("----------------------------------------------")
     print(f"query_vec 기반 완료 : {len(vector_results_ids)}개")
     print(get_jsons_by_ids(vector_results_ids[:3]))
@@ -68,7 +87,7 @@ def search_pipeline(item: QueryItem):
 
     # RRF 점수 계산
     rrf_input = []
-    k = 40  # RRF 상수 (표준값)
+    k = 60  # RRF 상수
 
     for id_ in all_ids:
         # 딕셔너리 lookup으로 순위 가져오기 (O(1))
@@ -88,17 +107,18 @@ def search_pipeline(item: QueryItem):
     top_panels = rrf_sorted[:min(item.count, len(rrf_sorted))]
     print("----------------------------------------------")
     print(f"rrf 완료 : {len(top_panels)}개")
-    print(get_jsons_by_ids([panel['id'] for panel in top_panels[:3]]))
+    print(get_jsons_by_ids([panel['id'] for panel in top_panels]))
 
     # 4. Sonnet으로 패널 필터링
     ## json_data_table에서 패널별 json데이터를 sonnet에 함께 넘긴다. 반환 값은 id만 받고, 
     ### 다시 sql id검색을 통해 온전한 json형태로 클라이언트에게 반환한다.
     panel_ids = [p["id"] for p in top_panels]
     panel_jsons = get_jsons_by_ids(panel_ids)
-    print("complete : panel_jsons ")
+    print(f"{time.time() - t01:.1}complete : panel_jsons ")
 
     final_ids = llm_filter_panel(clean_query, panel_jsons).strip().split(' ')
     answers = get_jsons_by_ids(final_ids)
+    answers = answers[:min(result_count, len(answers))]
 
     # 결과 콘솔에 출력
     print("----------------------------------------------")
@@ -117,8 +137,6 @@ def search_pipeline(item: QueryItem):
         }
     }
     
-
-
 
 @app.get("/")
 def root():
