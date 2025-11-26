@@ -60,32 +60,32 @@ def search_pipeline(item: QueryItem):
 
     t0 = time.time()
 
-    # 1단계: Sonnet 전처리 (병렬 처리: 쿼리 정제 + 개수 추출)
-    clean_query, result_count = preprocess_query(item.query)
+    # 1단계: Sonnet 전처리 (병렬 처리: 쿼리 정제 + 개수 추출 + 출생년도 추출)
+    clean_query, result_count, birth_years = preprocess_query(item.query)
 
     # RRF count 동적 계산: min(result_count * 3, 200)
     rrf_count = min(result_count * 3, 200)
 
-    log_line = f"{time.time() - t0:.1f}s, [1단계 완료] clean query: {clean_query}\nresult count: {result_count}\nRRF count: {rrf_count}"
+    log_line = f"{time.time() - t0:.1f}s, [1단계 완료] clean query: {clean_query}\nresult count: {result_count}\nbirth years: {birth_years if birth_years is not None else 'None (no age filter)'}\nRRF count: {rrf_count}"
     print(log_line)
     console_log.write(log_line + "\n")
 
     # ⭐ 2단계 병렬화: BM25 검색 + 벡터 검색 동시 실행
     t01 = time.time()
 
-    def vector_search_with_embedding(query):
+    def vector_search_with_embedding(query, birth_years):
         """쿼리 벡터화 + 검색을 하나의 함수로 묶음"""
         query_vec = get_query_vector(query)
-        return vector_search(query_vec, top_k=36000)
+        return vector_search(query_vec, top_k=36000, birth_years=birth_years)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        # 두 검색 작업을 동시에 제출
-        future_bm25 = executor.submit(bm25_search, clean_query, 36000)
-        future_vector = executor.submit(vector_search_with_embedding, clean_query)
+        # 두 검색 작업을 동시에 제출 (출생년도 필터링 적용)
+        future_bm25 = executor.submit(bm25_search, clean_query, 36000, birth_years)
+        future_vector = executor.submit(vector_search_with_embedding, clean_query, birth_years)
 
         # 모든 작업이 완료될 때까지 대기
         concurrent.futures.wait([future_bm25, future_vector])
- 
+
         # 결과 가져오기
         bm25_results_ids = future_bm25.result()
         vector_results_ids = future_vector.result()

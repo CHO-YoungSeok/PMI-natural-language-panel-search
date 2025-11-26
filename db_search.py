@@ -3,7 +3,7 @@ import numpy as np
 import os
 import re
 import pickle
-from typing import List, Dict
+from typing import List, Dict, Optional
 from pgvector.psycopg2 import register_vector
 from dotenv import load_dotenv
 from kiwipiepy import Kiwi
@@ -99,16 +99,63 @@ def preprocess_text(text: str) -> List[str]:
     return filtered_tokens
 
 
-def bm25_search(query: str, top_k: int = 100) -> List[str]:
+def filter_by_birth_years(ids: list, birth_years_str: Optional[str]) -> List[str]:
     """
-    BM25 기반 검색 (전처리 강화, 캐시 사용)
+    패널 ID 리스트를 출생년도로 필터링
+
+    Args:
+        ids: 필터링할 패널 ID 리스트
+        birth_years_str: 공백으로 구분된 출생년도 문자열 또는 None (필터링 안함)
+
+    Returns:
+        필터링된 ID 리스트 (birth_years_str이 None이면 원본 리스트 반환)
+    """
+    if birth_years_str is None or not ids:
+        return ids
+
+    # 출생년도 문자열을 리스트로 파싱
+    birth_years = birth_years_str.split()
+
+    conn = get_json_db_conn()
+    cur = conn.cursor()
+
+    try:
+        # info_text JSON에서 '출생년도' 필드를 추출하여 필터링
+        # PostgreSQL의 jsonb 연산자 사용
+        sql = """
+            SELECT id
+            FROM wellcome1st_json_data
+            WHERE id = ANY(%s)
+            AND (info_text::jsonb->>'출생년도') = ANY(%s)
+        """
+        cur.execute(sql, (ids, birth_years))
+        filtered_ids = [r[0] for r in cur.fetchall()]
+
+        print(f"출생년도 필터링: {len(ids)}개 → {len(filtered_ids)}개 (출생년도: {len(birth_years)}개)")
+
+        return filtered_ids
+
+    except Exception as e:
+        print(f"✗ 출생년도 필터링 실패: {e}")
+        # 필터링 실패 시 원본 리스트 반환
+        return ids
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def bm25_search(query: str, top_k: int = 100, birth_years: Optional[str] = None) -> List[str]:
+    """
+    BM25 기반 검색 (전처리 강화, 캐시 사용, 출생년도 필터링)
 
     Args:
         query: 검색 쿼리 (자연어 문장)
         top_k: 반환할 최대 결과 개수
+        birth_years: 공백으로 구분된 출생년도 문자열 (옵션)
 
     Returns:
-        List[str]: 관련도 높은 순으로 정렬된 ID 리스트
+        List[str]: 관련도 높은 순으로 정렬된 ID 리스트 (출생년도 필터링 적용)
     """
     # 캐시된 인덱스 파일에서 로드
     cache_file = 'bm25_index.pkl'
@@ -151,28 +198,55 @@ def bm25_search(query: str, top_k: int = 100) -> List[str]:
     #     idx = top_indices[i]
     #     print(f"  {i+1}. ID: {doc_ids[idx]}, Score: {scores[idx]:.4f}")
 
+    # 출생년도 필터링 적용
+    if birth_years is not None:
+        results = filter_by_birth_years(results, birth_years)
+
     return results
 
 
 
-def vector_search(query_vec: list, top_k: int = 100) -> List[str]:
+def vector_search(query_vec: list, top_k: int = 100, birth_years: Optional[str] = None) -> List[str]:
     """
-    wellcome1st_vector_data 테이블에서 벡터 유사도 기반 검색
+    wellcome1st_vector_data 테이블에서 벡터 유사도 기반 검색 (출생년도 필터링 지원)
+
+    Args:
+        query_vec: 쿼리 임베딩 벡터
+        top_k: 반환할 최대 결과 개수
+        birth_years: 공백으로 구분된 출생년도 문자열 (옵션)
+
+    Returns:
+        List[str]: 유사도 높은 순으로 정렬된 ID 리스트 (출생년도 필터링 적용)
     """
     conn = get_vector_db_conn()
     cur = conn.cursor()
-    
+
     try:
         if not isinstance(query_vec, np.ndarray):
             query_vec = np.array(query_vec)
-        
-        sql = """
-            SELECT fk_id, embedding <=> %s AS distance
-            FROM wellcome1st_vector_data
-            ORDER BY distance ASC
-            LIMIT %s
-        """
-        cur.execute(sql, (query_vec, top_k)) 
+
+        if birth_years is not None:
+            # 출생년도 필터링: JOIN으로 한 번에 처리
+            birth_year_list = birth_years.split()
+            sql = """
+                SELECT v.fk_id, v.embedding <=> %s AS distance
+                FROM wellcome1st_vector_data v
+                JOIN wellcome1st_json_data j ON v.fk_id = j.id
+                WHERE (j.info_text::jsonb->>'출생년도') = ANY(%s)
+                ORDER BY distance ASC
+                LIMIT %s
+            """
+            cur.execute(sql, (query_vec, birth_year_list, top_k))
+        else:
+            # 필터링 없음: 기존 로직
+            sql = """
+                SELECT fk_id, embedding <=> %s AS distance
+                FROM wellcome1st_vector_data
+                ORDER BY distance ASC
+                LIMIT %s
+            """
+            cur.execute(sql, (query_vec, top_k))
+
         results = [r[0] for r in cur.fetchall()]
         return results
 

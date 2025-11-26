@@ -1,26 +1,47 @@
 import anthropic, os, json
-from anthropic import AnthropicBedrock
+from anthropic import AnthropicBedrock, RateLimitError
+from typing import Optional, Tuple
+import re
+import json
+import logging
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
+
+# 로거 설정
+logger = logging.getLogger(__name__)
 
 # 전역 클라이언트 선언 (모듈 로드 시 한 번만 생성)
 SONNET_CLIENT = AnthropicBedrock(aws_region="ap-southeast-2")
 NORTH_SONNET_CLIENT = AnthropicBedrock(aws_region="ap-northeast-1")
 
-def preprocess_query(query: str) -> tuple[str, int]:
+def preprocess_query(query: str) -> Tuple[str, int, Optional[str]]:
     """
     쿼리 전처리 및 개수 추출 (병렬 처리로 속도 최적화)
- 
-    두 개의 LLM 호출을 병렬로 실행:
+
+    세 개의 LLM 호출을 병렬로 실행:
     1. 개수 추출: 쿼리에서 요구 개수 파싱 (기본값 30)
     2. 쿼리 정제: 개수 정보 제거, 조건 명확화, 표준화
+    3. 출생년도 추출: 나이 표현을 출생년도로 변환
 
     Returns:
-        tuple[str, int]: (정제된_쿼리, 요구_개수)
+        Tuple[str, int, Optional[str]]: (정제된_쿼리, 요구_개수, 출생년도_문자열 또는 None)
     """
     from concurrent.futures import ThreadPoolExecutor
-    import concurrent.futures  
+    import concurrent.futures
 
+    @retry(
+        retry=retry_if_exception_type(RateLimitError),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        stop=stop_after_attempt(5),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def extract_count(q: str) -> int:
-        """개수 추출 (별도 스레드에서 실행)"""
+        """개수 추출 with retry logic (별도 스레드에서 실행)"""
         count_system_prompt = """
 당신은 한국어 자연어 검색 쿼리에서 "최종 몇 명의 결과를 반환해야 하는지"를 추출하는 전문가입니다.
 
@@ -45,7 +66,7 @@ def preprocess_query(query: str) -> tuple[str, int]:
   * "경기 OTT 이용자" → 30 (개수 없음)
   * "부산 30대 여자 열 명" → 10
 """
-        count_message = NORTH_SONNET_CLIENT.messages.create(
+        count_message = SONNET_CLIENT.messages.create(
             model="anthropic.claude-3-haiku-20240307-v1:0",
             max_tokens=8,
             temperature=0.0,
@@ -57,8 +78,14 @@ def preprocess_query(query: str) -> tuple[str, int]:
         except (ValueError, TypeError):
             return 30  # 변환 실패 시 기본값
 
+    @retry(
+        retry=retry_if_exception_type(RateLimitError),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        stop=stop_after_attempt(5),
+        before_sleep=before_sleep_log(logger, logging.WARNING)
+    )
     def clean_query_text(q: str) -> str:
-        """쿼리 정제 (별도 스레드에서 실행)"""
+        """쿼리 정제 with retry logic (별도 스레드에서 실행)"""
         clean_system_prompt = """
 당신은 설문·패널 기반 자연어 검색 시스템에서 입력 쿼리의 품질을 극대화하는 검색질문 전처리 전문가입니다.
 
@@ -85,30 +112,132 @@ def preprocess_query(query: str) -> tuple[str, int]:
         )
         return clean_message.content[0].text.strip()
 
-    # 병렬 실행
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # 병렬 실행 (3개 작업)
+    with ThreadPoolExecutor(max_workers=3) as executor:
         future_count = executor.submit(extract_count, query)
         future_clean = executor.submit(clean_query_text, query)
+        future_birth_years = executor.submit(extract_birth_years, query)
 
         # 모든 작업 완료 대기
-        concurrent.futures.wait([future_count, future_clean])
+        concurrent.futures.wait([future_count, future_clean, future_birth_years])
 
         # 결과 가져오기
         result_count = future_count.result()
         clean_query = future_clean.result()
+        birth_years = future_birth_years.result()
 
-    return (clean_query, result_count)
+    return (clean_query, result_count, birth_years)
 
-import re
-import json
 
-# 실제 사용 시 적절한 클라이언트 객체로 교체하세요
-# from anthropic import Anthropic
-# SONNET_CLIENT = Anthropic(api_key="...")
 
+
+@retry(
+    retry=retry_if_exception_type(RateLimitError),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(5),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
+def extract_birth_years(query: str) -> Optional[str]:
+    """
+    Extract age/age range expressions from Korean queries with retry logic
+
+    Args:
+        query: User search query in Korean
+
+    Returns:
+        Space-separated birth year string (e.g., "1996 1997 1998 1999 2000") or None if no age expression
+    """
+    birth_year_system_prompt = """
+You are an expert at analyzing Korean natural language queries to extract age/age range expressions and convert them into corresponding birth years.
+
+## Task:
+Extract age-related terms from Korean queries and output ALL matching birth years as space-separated integers.
+
+## Rules:
+1. If age expressions exist: Output all corresponding birth years separated by single spaces
+2. If no age expressions exist: Output exactly "NONE"
+3. Base all calculations on current year: 2025
+4. Output format: Only 4-digit years with spaces between them (no text, explanations, or units)
+
+## Age Expression Mappings (Korean → Birth Years):
+
+### Decade Terms:
+- [translate:10대] (teens): 2006-2015 (ages 10-19)
+- [translate:20대] (twenties): 1996-2005 (ages 20-29)
+- [translate:30대] (thirties): 1986-1995 (ages 30-39)
+- [translate:40대] (forties): 1976-1985 (ages 40-49)
+- [translate:50대] (fifties): 1966-1975 (ages 50-59)
+- [translate:60대] (sixties): 1956-1965 (ages 60-69)
+- [translate:70대] (seventies): 1946-1955 (ages 70-79)
+
+### Generational Terms:
+- [translate:젊은이]/[translate:젊은층] (young people/youth): 1991-2006 (ages 18-34)
+- [translate:청장년층] (young to middle-aged): 1976-2006 (ages 19-49)
+- [translate:중장년층] (middle to older-aged): 1961-1985 (ages 40-64)
+- [translate:노인]/[translate:어르신]/[translate:늙은이] (elderly/seniors): 1926-1960 (ages 65+)
+
+### Life Stage Terms:
+- [translate:학생] (students, K-12 & college): 2001-2018 (ages 7-24)
+- [translate:어린이] (children): 2013-2019 (ages 6-12)
+- [translate:아기] (babies/infants): 2021-2025 (ages 0-4)
+
+## Examples:
+
+Input: "[translate:서울 20대 남자]"
+Output: 1996 1997 1998 1999 2000 2001 2002 2003 2004 2005
+
+Input: "[translate:경기 여성 100명]"
+Output: NONE
+
+Input: "[translate:젊은이 50명]"
+Output: 1991 1992 1993 1994 1995 1996 1997 1998 1999 2000 2001 2002 2003 2004 2005 2006
+
+Input: "[translate:30~40대 남자]"
+Output: 1976 1977 1978 1979 1980 1981 1982 1983 1984 1985 1986 1987 1988 1989 1990 1991 1992 1993 1994 1995
+
+## Important Notes:
+- For range expressions like "[translate:30~40대]", include ALL years from both decades
+- Always output complete year sequences (don't skip years)
+- Match Korean age terminology exactly as specified above
+"""
+
+    try:
+        birth_year_message = NORTH_SONNET_CLIENT.messages.create(
+            model="anthropic.claude-3-haiku-20240307-v1:0",
+            max_tokens=256,
+            temperature=0.0,
+            system=birth_year_system_prompt,
+            messages=[{"role": "user", "content": f"Query: {query}"}]
+        )
+
+        result = birth_year_message.content[0].text.strip()
+
+        # Convert "NONE" to None
+        if result == "NONE":
+            return None
+
+        # Return space-separated birth year string
+        return result
+
+    except RateLimitError:
+        # Re-raise to trigger retry decorator
+        raise
+    except Exception as e:
+        # Log other errors and return None (skip filtering)
+        print(f"Birth year extraction error: {e}")
+        return None
+
+
+
+@retry(
+    retry=retry_if_exception_type(RateLimitError),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(5),
+    before_sleep=before_sleep_log(logger, logging.WARNING)
+)
 def llm_filter_panel(query: str, jsons: list) -> str:
     """
-    Sonnet을 사용하여 사용자 쿼리에 부합하는 패널을 필터링하고 랭킹을 매깁니다.
+    Sonnet panel filtering with retry logic
     정확도를 위해 CoT(Chain of Thought)를 유도하고, 결과만 파싱하여 반환합니다.
 
     Args:
@@ -214,9 +343,9 @@ Remember: Return EXACTLY the number of panels requested in the query.
                 {"role": "user", "content": user_prompt}
             ]
         )
-        
+
         raw_content = message.content[0].text
-        
+
         # 정규표현식으로 <result> 태그 안의 내용만 추출
         match = re.search(r'<result>(.*?)</result>', raw_content, re.DOTALL)
         if match:
@@ -225,6 +354,10 @@ Remember: Return EXACTLY the number of panels requested in the query.
             # 태그가 없을 경우(예외적 상황) 전체 텍스트에서 공백 정리 후 반환 시도
             return raw_content.strip()
 
+    except RateLimitError:
+        # Re-raise to trigger retry decorator
+        raise
     except Exception as e:
+        # Log other errors and return empty string
         print(f"LLM Error: {e}")
         return ""

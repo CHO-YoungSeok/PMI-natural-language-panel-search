@@ -57,7 +57,7 @@ def perform_search(query: str, k: int) -> dict:
         dict: Search results containing bm25_ids, vector_ids, rrf_ids
     """
     # Preprocess query
-    clean_query, _ = preprocess_query(query)
+    clean_query, _, _ = preprocess_query(query)
     print(f"    Clean query: {clean_query}")
 
     # Perform BM25 search (top 36000)
@@ -221,10 +221,10 @@ def run_tests():
                     "status": "success"
                 })
 
-                # 마지막 테스트가 아니면 5초 대기
+                # 마지막 테스트가 아니면 60초(1분) 대기
                 if completed < total_tests:
-                    print(f"  ⏳ 다음 테스트까지 5초 대기 중...")
-                    time.sleep(5)
+                    print(f"  ⏳ 다음 테스트까지 60초(1분) 대기 중...")
+                    time.sleep(60)
 
             except Exception as e:
                 print(f"    ✗ Failed: {e}")
