@@ -1,4 +1,12 @@
 .env
+CLAUDE.md
+testResult/
+
+db_search_structured.py
+query_vectorizer_structured.py
+rrf_logic_structured.py
+search_structured.py
+
 
 # 환경변수 및 비밀정보
 .env

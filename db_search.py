@@ -188,6 +188,10 @@ def get_jsons_by_ids(ids: list):
     Returns:
         [{"id": "...", "info_text": {...}}, ...]
     """
+    # 빈 리스트인 경우 빈 리스트 반환
+    if not ids:
+        return []
+
     conn = get_json_db_conn()
     cur = conn.cursor()
 

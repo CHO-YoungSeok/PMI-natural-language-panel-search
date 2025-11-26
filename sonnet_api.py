@@ -1,167 +1,230 @@
 import anthropic, os, json
 from anthropic import AnthropicBedrock
 
-def get_sonnet_client():
-    client = AnthropicBedrock(aws_region="ap-southeast-2")
-    return client
+# 전역 클라이언트 선언 (모듈 로드 시 한 번만 생성)
+SONNET_CLIENT = AnthropicBedrock(aws_region="ap-southeast-2")
+NORTH_SONNET_CLIENT = AnthropicBedrock(aws_region="ap-northeast-1")
 
-def preprocess_query(query: str) -> str:
+def preprocess_query(query: str) -> tuple[str, int]:
     """
-    Claude Sonnet을 사용해 '깔끔문장' 생성
+    쿼리 전처리 및 개수 추출 (병렬 처리로 속도 최적화)
+ 
+    두 개의 LLM 호출을 병렬로 실행:
+    1. 개수 추출: 쿼리에서 요구 개수 파싱 (기본값 30)
+    2. 쿼리 정제: 개수 정보 제거, 조건 명확화, 표준화
+
+    Returns:
+        tuple[str, int]: (정제된_쿼리, 요구_개수)
     """
-    client = get_sonnet_client()
-    
-    system_prompt = """당신은 검색 쿼리 전처리 전문가입니다. 
-사용자가 입력한 질문을 분석하여 다음 작업을 수행하세요:
-- 오타 및 맞춤법 오류 수정
-- 명확하고 간결한 검색용 문장으로 변환
-- 사용자의 모든 요구조건을 빠짐없이 모두 담아야한다.
-- **사용자 입력에 ‘비흡연’, ‘비정상’, ‘非흡연’, ‘non-smoking’, ‘무면허’ 등과 같이 ‘비/非/non/무/불/미 + 단어’ 형태의 표현이 등장하면, 이를 자동으로 ‘흡연을 하지 않는’, ‘정상이 아닌’, ‘면허가 없는’처럼 뒤에 오는 단어의 의미를 부정·반대·결여·제외하는 자연스러운 한국어 문장 또는 구로 풀어서 재표현하라.```
-- 20대 와 같이 범위로 나이를 묻는 표현은 "사용자가 나이 범위를 언급하면 다음 단계를 따르세요:
-    1. 현재 연도(2025년)를 확인
-    2. 나이 범위를 숫자로 변환 (예: "20대" = 20~29세)
-    3. 각 나이에서 출생년도 계산 (2025 - 나이)
-    4. "출생년도가 YYYY년생~YYYY년생" 형식으로 출력
-    처럼 범위로 해석해서 표현할 것.
-- 젊은층은 출생년도가 1995년도 이후, 노년층은 출생년도가 1965년 이전으로 해석해서 표현할 것.
-- ***반드시 전처리된 문장만 출력하세요. 추가 설명은 하지 마세요.***
+    from concurrent.futures import ThreadPoolExecutor
+    import concurrent.futures  
+
+    def extract_count(q: str) -> int:
+        """개수 추출 (별도 스레드에서 실행)"""
+        count_system_prompt = """
+당신은 한국어 자연어 검색 쿼리에서 "최종 몇 명의 결과를 반환해야 하는지"를 추출하는 전문가입니다.
+
+## 규칙:
+1. 반드시 하나의 자연수만 출력
+2. 자연수 이외의 어떤 문자도 출력하지 않음 (설명, 단위, 공백, 개행 금지)
+3. 쿼리에 명시된 인원 수 규칙:
+   - "10명", "30명", "100명" → 그 숫자 사용
+   - "열 명", "스무 명", "삼십 명" 등 한글 숫자도 인식
+   - 범위: "10~20명" → 상한값(20) 사용
+   - "최소 3명 이상" → 명시된 숫자(3) 사용
+   - **중요**: 개수 표현이 전혀 없으면 기본값 30 반환
+
+4. 검색 결과 개수와 무관한 숫자는 무시:
+   - 날짜, 연도, 연령대 등은 개수가 아님
+   - 예: "2024년 서울 20대" → 개수 없음 → 30 반환
+
+## 출력 형식:
+- 오직 하나의 양의 정수만 출력
+- 예시:
+  * "서울 20대 남자 100명" → 100
+  * "경기 OTT 이용자" → 30 (개수 없음)
+  * "부산 30대 여자 열 명" → 10
 """
-      
-    user_prompt = f"""다음 쿼리를 전처리하세요.: 원본 쿼리: {query} """
-    
-    message = client.messages.create(
-        model="au.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        max_tokens=512,
-        system=system_prompt,  # system 파라미터로 전달
-        messages=[
-            {"role": "user", "content": user_prompt}  # user_prompt 사용
-        ]
-    )
-    
-    return message.content[0].text.strip()
+        count_message = NORTH_SONNET_CLIENT.messages.create(
+            model="anthropic.claude-3-haiku-20240307-v1:0",
+            max_tokens=8,
+            temperature=0.0,
+            system=count_system_prompt,
+            messages=[{"role": "user", "content": f"쿼리: {q}"}]
+        )
+        try:
+            return int(count_message.content[0].text.strip())
+        except (ValueError, TypeError):
+            return 30  # 변환 실패 시 기본값
 
+    def clean_query_text(q: str) -> str:
+        """쿼리 정제 (별도 스레드에서 실행)"""
+        clean_system_prompt = """
+당신은 설문·패널 기반 자연어 검색 시스템에서 입력 쿼리의 품질을 극대화하는 검색질문 전처리 전문가입니다.
 
-def llm_filter_panel(query: str, jsons: list) -> list:
+## 반드시 다음을 지키세요:
+- 오타, 띄어쓰기, 맞춤법 오류를 완벽히 수정
+- 의도나 조건(지역, 성별, 출생년도, 경험, 이용여부 등)을 모두 자연어로 조합
+- **중요**: 쿼리에서 "30명", "100명", "열 명" 등 개수 표현은 완전히 제거
+- 부정·제외·결여 조건은 자연어로 풀어쓰기 ("비흡연" → "흡연을 하지 않는")
+- 영어, 한자, 접두사 형태('비', '불', '무', '미', 'non', '非')는 부정적 자연어로 풀어쓰기
+- "술"은 "음용경험"으로 표현
+- 젊은층은 출생년도로 해석 (20대~30대, 노년층은 60대 이상)
+- 전처리된 검색용 문장만 출력 (설명, 해석 X)
+
+## 예시:
+입력: "서울 및 경기 지역에 거주하며 OTT 서비스를 이용하는 20대~30대 성인 30명"
+출력: "서울 및 경기 지역에 거주하며 OTT 서비스를 이용하는 20대~30대 성인"
+"""
+        clean_message = NORTH_SONNET_CLIENT.messages.create(
+            model="anthropic.claude-3-haiku-20240307-v1:0",
+            max_tokens=512,
+            temperature=0.0,
+            system=clean_system_prompt,
+            messages=[{"role": "user", "content": f"원본 쿼리: {q}를 조건에 맞게 전처리해"}]
+        )
+        return clean_message.content[0].text.strip()
+
+    # 병렬 실행
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_count = executor.submit(extract_count, query)
+        future_clean = executor.submit(clean_query_text, query)
+
+        # 모든 작업 완료 대기
+        concurrent.futures.wait([future_count, future_clean])
+
+        # 결과 가져오기
+        result_count = future_count.result()
+        clean_query = future_clean.result()
+
+    return (clean_query, result_count)
+
+import re
+import json
+
+# 실제 사용 시 적절한 클라이언트 객체로 교체하세요
+# from anthropic import Anthropic
+# SONNET_CLIENT = Anthropic(api_key="...")
+
+def llm_filter_panel(query: str, jsons: list) -> str:
     """
-    Sonnet을 사용해서 최종 패널 필터링 및 랭킹
-    
+    Sonnet을 사용하여 사용자 쿼리에 부합하는 패널을 필터링하고 랭킹을 매깁니다.
+    정확도를 위해 CoT(Chain of Thought)를 유도하고, 결과만 파싱하여 반환합니다.
+
     Args:
         query: 사용자 검색 쿼리
         jsons: [{"id": "...", "info": {...}}, ...] 형식의 후보 패널 리스트
-    
+
     Returns:
-        필터링되고 랭킹된 패널 리스트 (각 패널의 id를 ' '(공백)로 구분한다)
-    """    
+        공백으로 구분된 패널 ID 문자열 (예: "w1 w2 w3")
+    """
     if not jsons:
-        return []
-
-    client = get_sonnet_client()
+        return ""
     
     system_prompt = """
-당신은 패널들의 설문조사 데이터를 기반으로, 사용자의 검색 쿼리에 가장 잘 맞는 순으로 패널들을 나열하는 AI 어시스턴트입니다.
-사용자의 검색 의도를 정확히 파악하고, 관련성 높은 순으로 패널들을 정렬하는 것이 당신의 임무입니다.
+You are an expert panel ranking AI. Your task is to select and rank survey panels based on their relevance to a search query.
 
-# 입력 데이터 설명
-- 너에게 주어지는 데이터는 "패널 정보"이며, 각 패널은 다음과 같은 JSON 구조를 가진다.
-{
-  "id": "패널의 고유 ID (string)",
-  "info": {
-    "<질문/필드 이름>": "<응답 값>",
-    ...
-  }
-}
+# Input Format
+Each panel has:
+- `id`: A unique identifier string (e.g., "w10001", "w10023")
+- `info`: A dictionary containing demographic and behavioral data
 
-# 작업 지시사항
-- id 필드는 단순 식별용으로만 사용하며, 의미 판단에는 절대 사용하지 마라.
-- 의미 판단과 검색 쿼리 매칭에 사용할 수 있는 정보는 오직 info 내부의 key와 value이며, value를 중심으로 검색 쿼리와의 적합도를 판단하라.
-- 검색 쿼리와 가장 관련성이 높은 패널 순으로 정렬해 반환하라.
+# Your Task
 
-# 조건 기반 점수 규칙 
-- 사용자의 검색 쿼리는 여러 개의 "조건"(예: 지역, 연령, 성별, 행동/경험 등)으로 이루어져 있다.
-- 먼저 쿼리에서 이러한 조건들을 스스로 추출하라.
-- 각 후보 패널에 대해 info 내부의 모든 key와 value를 읽고, 각 조건에 대해 다음 기준으로 판단하라.
-- 조건을 만족하는 명확한 근거가 info 안에 있으면 +1점.
-- 조건과 반대되는 근거가 있으면 확실하게 -5점.
-- 쿼리에서 중요한 키워드(예: "술을 먹은", "OTT를 이용하는" 등)가 info 어딘가에 전혀 언급되지 않으면, 0점을 주어라.
-- 각 패널의 적합도 최종 점수를 계산하라.
-- 점수가 높은 패널일수록 검색 쿼리와 더 잘 맞는 것으로 간주하고 상위에 두어라.
+## CRITICAL: Absolute Location Filtering
+**This is the HIGHEST priority rule - override all other scoring:**
 
-# 반환 형식
-- 검색 쿼리에 대한 적합도가 높은 순으로 id를 나열하라.
-- id만 공백 한 칸으로 구분하여 한 줄로 반환하라. 예시: "w10001 w10023 w10087"
-- 다른 설명, 이유, 문장, 마크다운, 따옴표는 절대 포함하지 마라.
-- 입력으로 들어온 모든 패널들을 적합도 순으로 정렬하여 하나도 빠짐 없이 반환하라.
+1. Extract location criteria from query (e.g., "서울", "경기", "부산", "인천", etc.)
+2. For EACH panel:
+   - Check if panel's location field in `info` matches the query's location requirement
+   - Location matching rules:
+     * Query mentions "서울" → ONLY accept panels with "서울" in location field
+     * Query mentions "경기" → ONLY accept panels with "경기" in location field
+     * Query mentions "인천" → ONLY accept panels with "인천" in location field
+     * Partial matches NOT allowed (e.g., "경기" ≠ "서울", "인천" ≠ "서울")
+   - If location DOES NOT match: IMMEDIATELY assign score = -9999 (disqualified)
+   - If location matches OR no location specified in query: proceed with normal scoring
+
+3. Examples:
+   - Query: "서울에 거주하는 20대"
+     * Panel location "서울" → Proceed with normal scoring ✓
+     * Panel location "경기" → score = -9999 (DISQUALIFIED) ✗
+     * Panel location "인천" → score = -9999 (DISQUALIFIED) ✗
+   - Query: "경기 30대 남성"
+     * Panel location "경기" → Proceed with normal scoring ✓
+     * Panel location "서울" → score = -9999 (DISQUALIFIED) ✗
+
+**This location filtering rule applies BEFORE any other scoring criteria.**
+
+## Standard Scoring (applied AFTER location filtering)
+
+1. Analyze the search query to extract:
+   - Target criteria (location, age, gender, behaviors, etc.)
+   - Required count N (e.g., "20명" = 20, "100명" = 100, "30명" = 30)
+
+2. Score each panel (only if not disqualified by location):
+   - Start with 50 points (neutral)
+   - +10 points: Panel perfectly matches a critical criterion (age, gender)
+   - +5 points: Panel matches a secondary criterion (behavior, preference)
+   - -100 points: Panel directly contradicts a criterion (e.g., query wants "male" but panel is "female")
+   - -10 points: Panel contradicts a secondary criterion
+   - Ignore the `id` field for matching - only use `info` values
+
+3. Rank ALL panels by score (highest first, disqualified panels at bottom)
+
+4. **ABSOLUTE COUNT REQUIREMENT**:
+   - Extract requested count N from query (e.g., "100명" → N=100)
+   - After scoring ALL panels (including disqualified ones):
+     * Sort by score (highest first)
+     * Select top N panels
+   - You MUST return EXACTLY N panel IDs
+   - ONLY exception: if total candidates < N, return ALL candidates
+   - Even if top N includes low/negative scores, still return them
+   - If the query asks for "30명", return EXACTLY 30 panel IDs
+   - If the query asks for "100명", return EXACTLY 100 panel IDs
+
+# CRITICAL OUTPUT REQUIREMENTS
+- You MUST output ONLY space-separated IDs inside <result> tags
+- Format: <result>w10001 w10023 w10087</result>
+- ABSOLUTELY NO other text, explanations, numbers, labels, punctuation, or line breaks inside <result> tags
+- Only IDs separated by single spaces
+- Return EXACTLY N IDs (the number requested in the query)
+
+Example for "30명" query:
+<result>w10001 w10023 w10087 w10045 w10099 w10123 w10145 w10167 w10189 w10201 w10223 w10245 w10267 w10289 w10301 w10323 w10345 w10367 w10389 w10401 w10423 w10445 w10467 w10489 w10501 w10523 w10545 w10567 w10589 w10601</result>
 """
 
-    user_prompt = f"""## 검색 쿼리 : ###{query} 에 가장 부합###하는 패널들을 상위로 선별하세요.
-    후보 패널 : {jsons}
-    """
-    
-    message = client.messages.create(
-        model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        max_tokens=2048,
-        system=system_prompt,  # system 파라미터로 전달
-        messages=[
-            {"role": "user", "content": user_prompt}  # user_prompt 사용
-        ]
-    )
-    
-    return message.content[0].text.strip()
+    user_prompt = f"""Search Query: {query}
 
+Candidate Panels (Total: {len(jsons)} panels):
+{json.dumps(jsons, ensure_ascii=False, indent=2)}
 
-def extract_result_count(query: str) -> str:
-    """
-    Claude Sonnet을 사용해 최종 몇 명을 반환할지 추론한다.
-    기본 값은 30명이며, 쿼리에 명시적 숫자가 없으면 30을 반환한다.
-    """
-    client = get_sonnet_client()
-    
-    system_prompt = """
-당신의 역할은 한국어 자연어 검색 쿼리에서
-"최종 몇 명의 결과를 반환해야 하는지"를 추출하는 전처리기입니다.
-기본 값은 30명이며, 쿼리에 명시적 숫자가 없으면 30을 반환한다.
-
-#규칙:
-1. 반드시 하나의 자연수만 출력한다.
-2. 자연수 이외의 어떤 문자도 출력하지 않는다.
-   - 설명, 단위(명, 개), 마침표, 공백, 개행 모두 금지.
-3. 쿼리에 명시된 인원 수 규칙:
-   - "10명", "열 명", "상위 5명", "최대 20명", "20명까지만" 등 → 그 숫자를 그대로 사용.
-   - "몇 명", "여러 명", "다수", "여러 사람" 등 모호 표현 → 기본값 30으로 처리.
-   - 범위가 있는 경우
-       · "10~20명", "10-20명" → 상한값(20)을 사용.
-       · "최소 3명 이상", "3명 이상 추천" → 명시된 숫자(3)를 사용.
-       · "3명에서 5명 정도" → 상한값(5)을 사용.
-   - "탑 3", "top 3", "Top3" 등 → 3을 사용.
-4. 숫자가 여러 개 등장하면 "결과 개수"와 가장 직접적으로 연결된 숫자를 우선한다.
-   - 예: "최근 3개월 활동 기준으로 상위 10명 추천" → 10
-5. 쿼리에 "한 명", "1명", "1사람" 등 1명을 의미하는 표현이 있으면 1을 사용.
-6. 쿼리에 결과 개수 관련 숫자가 전혀 없으면 30을 출력한다.
-7. 자연어 숫자도 인식한다.
-   - "한 명, 두 명, 세 명, 네 명, 다섯 명, 여섯 명, 일곱 명, 여덟 명, 아홉 명, 열 명" 등.
-8. 검색 결과 개수와 무관한 숫자는 무시한다.
-   - 날짜, 연도, 버전, 점수, 금액, 아이디, 페이지 수, 기간 등:
-     예: "2024년 데이터로 상위 10명" → 10만 사용.
-9. 기본 값은 30명이며, 쿼리에 명시적 숫자가 없거나, 의미를 알 수 없어도 30을 출력한다.
-
-##출력 형식:
-- 오직 하나의 양의 정수만 출력한다.
-- 공백, 개행, 다른 문자는 일절 포함하지 않는다.
+Select the most relevant panels and output ONLY their IDs in this exact format.
+Remember: Return EXACTLY the number of panels requested in the query.
+<result>w10001 w10023 w10087</result>
 """
 
-    user_prompt = f"""
-다음 쿼리에서 최종 반환해야 할 "명 수"를 위 규칙에 따라 결정하세요.
+    try:
+        message = SONNET_CLIENT.messages.create(
+            model="global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            max_tokens=4096,
+            temperature=0.0,
+            system=system_prompt,
+            messages=[
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        
+        raw_content = message.content[0].text
+        
+        # 정규표현식으로 <result> 태그 안의 내용만 추출
+        match = re.search(r'<result>(.*?)</result>', raw_content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        else:
+            # 태그가 없을 경우(예외적 상황) 전체 텍스트에서 공백 정리 후 반환 시도
+            return raw_content.strip()
 
-쿼리: {query}
-"""
-
-    message = client.messages.create(
-        model="au.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        max_tokens=8,
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": user_prompt}
-        ]
-    )
-    
-    return message.content[0].text.strip()
+    except Exception as e:
+        print(f"LLM Error: {e}")
+        return ""

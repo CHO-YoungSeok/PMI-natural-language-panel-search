@@ -9,12 +9,14 @@ pydantic==2.5.0
 ## aws RDS postgreSQL 활용
 
 # Machine Learning & NLP
-sentence-transformers==2.2.2
+sentence-transformers==5.1.2
 numpy==1.24.3
 torch==2.3.0
+huggingface-hub==0.36.0
 
 # Korean NLP
 kiwipiepy==0.16.2
+kiwipiepy-model==0.16.0
 rank-bm25==0.2.2
 
 # LLM Integration (AWS Bedrock)
