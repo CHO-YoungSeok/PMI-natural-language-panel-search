@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import sys, os, time, re, json
 from fastapi.middleware.cors import CORSMiddleware
-from db_search import bm25_search, vector_search, get_jsons_by_ids
+from db_search import bm25_search, vector_search, get_jsons_by_ids, has_field_info, extract_regions_from_query, extract_gender_from_query
 from sonnet_api import preprocess_query, llm_filter_panel
 from query_vectorizer import get_query_vector
 import numpy as np
@@ -28,7 +28,7 @@ app.add_middleware(
 
 class QueryItem(BaseModel):
     query: str
-    count: int = 150  # RRF를 통해 산출할 개수 => llm_filter 입력 개수
+    count: int = 150  # RRF를 통해 산출할 개수 >  min(result_count, 150)
     k: int = 60  # RRF 상수 (기본값: 60)
 
 @app.post("/ask")
@@ -63,25 +63,30 @@ def search_pipeline(item: QueryItem):
     # 1단계: Sonnet 전처리 (병렬 처리: 쿼리 정제 + 개수 추출 + 출생년도 추출)
     clean_query, result_count, birth_years = preprocess_query(item.query)
 
-    # RRF count 동적 계산: min(result_count * 3, 200)
-    rrf_count = min(result_count * 3, 200)
+    # 거주지역 및 성별 추출 (clean_query 기반, 키워드 매칭)
+    regions = extract_regions_from_query(clean_query)
+    genders = extract_gender_from_query(clean_query)
 
-    log_line = f"{time.time() - t0:.1f}s, [1단계 완료] clean query: {clean_query}\nresult count: {result_count}\nbirth years: {birth_years if birth_years is not None else 'None (no age filter)'}\nRRF count: {rrf_count}"
+    # RRF count 동적 계산: min(result_count * 3, item.count)
+    rrf_count = min(result_count * 3, item.count)
+
+    log_line = f"{time.time() - t0:.1f}s, [1단계 완료] clean query: {clean_query}\nresult count: {result_count}\nbirth years: {birth_years if birth_years is not None else 'None (no age filter)'}\nregions: {regions if regions is not None else 'None (no region filter)'}\ngenders: {genders if genders is not None else 'None (no gender filter)'}\nRRF count: {rrf_count}"
     print(log_line)
     console_log.write(log_line + "\n")
 
     # ⭐ 2단계 병렬화: BM25 검색 + 벡터 검색 동시 실행
     t01 = time.time()
 
-    def vector_search_with_embedding(query, birth_years):
+    def vector_search_with_embedding(query, birth_years, regions, genders):
         """쿼리 벡터화 + 검색을 하나의 함수로 묶음"""
         query_vec = get_query_vector(query)
-        return vector_search(query_vec, top_k=36000, birth_years=birth_years)
+        return vector_search(query_vec, top_k=36000, birth_years=birth_years,
+                           regions=regions, genders=genders)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        # 두 검색 작업을 동시에 제출 (출생년도 필터링 적용)
-        future_bm25 = executor.submit(bm25_search, clean_query, 36000, birth_years)
-        future_vector = executor.submit(vector_search_with_embedding, clean_query, birth_years)
+        # 두 검색 작업을 동시에 제출 (출생년도/거주지역/성별 필터링 적용)
+        future_bm25 = executor.submit(bm25_search, clean_query, 36000, birth_years, regions, genders)
+        future_vector = executor.submit(vector_search_with_embedding, clean_query, birth_years, regions, genders)
 
         # 모든 작업이 완료될 때까지 대기
         concurrent.futures.wait([future_bm25, future_vector])
@@ -119,6 +124,36 @@ def search_pipeline(item: QueryItem):
     log_line = json.dumps(vector_top30, indent=2, ensure_ascii=False)
     print(log_line)
     console_log.write(log_line + "\n")
+
+    # 2.5. 도메인 키워드 기반 필터링 (음용경험/OTT)
+    # 쿼리에서 특정 도메인 키워드 감지
+    domain_filters = []
+    if any(keyword in clean_query for keyword in ['OTT', '넷플릭스', '웨이브', '티빙', '왓챠', '쿠팡플레이']):
+        domain_filters.append('여러분이 현재 이용 중인 OTT 서비스는 몇 개인가요?')
+    if any(keyword in clean_query for keyword in ['음용', '술', '맥주', '소주', '음주', '와인', '위스키']):
+        domain_filters.append('음용경험 술')    
+
+    # 도메인 필터 적용
+    if domain_filters:
+        log_line = "----------------------------------------------"
+        print(log_line)
+        console_log.write(log_line + "\n")
+
+        log_line = f"도메인 키워드 감지: {domain_filters}"
+        print(log_line)
+        console_log.write(log_line + "\n")
+
+        # BM25 결과 필터링
+        bm25_results_ids = has_field_info(bm25_results_ids, domain_filters)
+        log_line = f"BM25 필터링 후: {len(bm25_results_ids)}개"
+        print(log_line)
+        console_log.write(log_line + "\n")
+
+        # Vector 결과 필터링
+        vector_results_ids = has_field_info(vector_results_ids, domain_filters)
+        log_line = f"Vector 필터링 후: {len(vector_results_ids)}개"
+        print(log_line)
+        console_log.write(log_line + "\n")
 
     # 3. RRF 융합
     bm25_ids = bm25_results_ids

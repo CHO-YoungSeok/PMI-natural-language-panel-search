@@ -1,38 +1,49 @@
 """
-RRF k-value Performance Testing Script
+RRF k-value Performance Testing Script - API Call Version
 
-This script automates testing of different RRF k values with multiple queries.
-Results are saved to testResult/ directory with separate files for BM25, Vector, and RRF results.
+Tests the search API endpoint (/ask) with multiple queries.
+Results are saved to testResult/ directory.
 
 Test configuration:
 - 4 test queries
 - k values: [60]
-- Total experiments: 4
+- Uses FastAPI endpoint instead of direct function calls
 
 Output includes:
-- BM25 top 100 results (separate file)
-- Vector top 100 results (separate file)
-- RRF top 100 results (separate file)
-- Each query has its own set of files
+- Full API responses with search results
+- Summary report with metrics
 """
-  
+
 import json
 import os
 import time
+import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from db_search import bm25_search, vector_search, get_jsons_by_ids
-from query_vectorizer import get_query_vector
-from sonnet_api import preprocess_query
 
 # Test configuration
 OUTPUT_DIR = "testResult"
+API_URL = "http://localhost:8000/ask"  # FastAPI endpoint
 
 TEST_QUERIES = [
-    "서울 20대 남자 100명",
-    "경기 30~40대 남자 술을 먹은 사람 50명",
-    "서울, 경기 OTT 이용하는 젊은층 30명",
-    "고등학교 이하 학력 중 휴대폰이 아이폰인 사람 30명"
+    # "서울 20대 남자 100명 ",
+    # "경기 30~40대 남자 술을 먹은 사람 50명 ",
+    # "서울, 경기 OTT 이용하는 젊은층 30명 ",
+    # "고등학교 이하 학력 중 월 소득이 300만원 이상이면서 휴대폰이 아이폰인 사람 30명",
+    "서울 에 살 규 이쓰며서, 30대 남졍이고, 아이폰을 쓰는 사람 50명"
+    # "경기 30~40대 남자 술을 먹은 사람 100명",
+    # "서울 50대 이상 남자 중 술을 안먹는 사람 50명",
+    # "서울, 경기 OTT 이용하는 젊은층 30명",
+    # "OTT 이용하지 않는 젊은층 30명",
+    # "애플(아이폰) 사용자 중 20대 여성 30명",
+    # "전업주부이면서 자녀가 있는 사람 50명",
+    # "대졸 이상 학력의 미혼 남성 40명",
+    # "월 개인소득 300만원 이상인 직장인 45명",
+    # "서울 에 살 규 이쓰며서, 30대 남졍이고, 한달에 소득이 500만원 이하인 샤람",
+    # "경기도에 살고 기혼이며 자녀가 있고 월 가구소득 800만원 이상인 사람 30명",
+    # "20대 미혼 여성 중 대학생이고 혼자 거주하며 아이폰을 사용하는 사람 20명",
+    # "부산 거주, 40대 기혼 남성, 차량 보유자이며 월 가구소득 200만원 ~ 600만원 사이인 사람 50명",
+    #  "IT 직무 종사자 중 월 개인소득 500만원 이상이고 미혼인 사람 18명",
 ]
 
 K_VALUES = [60]
@@ -42,135 +53,77 @@ def ensure_output_dir():
     """Create output directory if it doesn't exist."""
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
-        print(f"Created output directory: {OUTPUT_DIR}/")
 
 
-def perform_search(query: str, k: int) -> dict:
+def call_search_api(query: str, count: int, k: int) -> dict:
     """
-    Perform hybrid search and return BM25, Vector, and RRF results.
+    Call the search API endpoint.
 
     Args:
         query: Search query string
+        count: Number of results to return
         k: RRF k value
 
     Returns:
-        dict: Search results containing bm25_ids, vector_ids, rrf_ids
+        dict: API response containing results
     """
-    # Preprocess query
-    clean_query, _, _ = preprocess_query(query)
-    print(f"    Clean query: {clean_query}")
-
-    # Perform BM25 search (top 36000)
-    print(f"    Performing BM25 search...")
-    bm25_results_ids = bm25_search(clean_query, 36000)
-
-    # Perform Vector search (top 36000)
-    print(f"    Performing Vector search...")
-    query_vec = get_query_vector(clean_query)
-    vector_results_ids = vector_search(query_vec, top_k=36000)
-
-    # Perform RRF fusion
-    print(f"    Performing RRF fusion with k={k}...")
-    bm25_ids = bm25_results_ids
-    vector_ids = vector_results_ids
-    bm25_rank_map = {id_: rank + 1 for rank, id_ in enumerate(bm25_ids)}
-    vector_rank_map = {id_: rank + 1 for rank, id_ in enumerate(vector_ids)}
-
-    all_ids = list(set(bm25_ids + vector_ids))
-
-    # RRF score calculation
-    rrf_input = []
-    for id_ in all_ids:
-        bm25_rank = bm25_rank_map.get(id_, len(bm25_ids) + 1)
-        vector_rank = vector_rank_map.get(id_, len(vector_ids) + 1)
-        rrf_score = (1.0 / (k + bm25_rank)) + (1.0 / (k + vector_rank))
-
-        rrf_input.append({
-            "id": id_,
-            "rrf_score": rrf_score
-        })
-
-    # Sort by RRF score (highest first)
-    rrf_sorted = sorted(rrf_input, key=lambda x: x["rrf_score"], reverse=True)
-    rrf_ids = [item["id"] for item in rrf_sorted]
-
-    return {
-        "clean_query": clean_query,
-        "bm25_ids": bm25_results_ids,
-        "vector_ids": vector_results_ids,
-        "rrf_ids": rrf_ids
+    payload = {
+        "query": query,
+        "count": count,
+        "k": k
     }
 
+    response = requests.post(API_URL, json=payload, timeout=120)
+    response.raise_for_status()
 
-def save_results(query_idx: int, k: int, original_query: str, result: dict):
+    return response.json()
+
+
+def save_results(query_idx: int, k: int, original_query: str, api_response: dict):
     """
-    Save BM25, Vector, and RRF results to separate JSON files.
+    Save API response to JSON file.
 
     Args:
-        query_idx: Query index (0, 1, 2, 3)
+        query_idx: Query index
         k: RRF k value
         original_query: Original user query
-        result: Search results dict containing bm25_ids, vector_ids, rrf_ids
+        api_response: Full API response
     """
     kst_time = datetime.now(ZoneInfo("Asia/Seoul"))
 
-    # Common metadata
-    metadata = {
-        "timestamp": kst_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-        "query_index": query_idx,
-        "k_value": k,
-        "original_query": original_query,
-        "clean_query": result.get("clean_query", "")
+    # Remove console_log from saved data (keep for terminal output only)
+    api_response_clean = {
+        key: value for key, value in api_response.items()
+        if key != "console_log"
     }
 
-    # Save BM25 top 100 results
-    bm25_top100_ids = result["bm25_ids"][:100]
-    bm25_data = {
-        **metadata,
-        "search_type": "BM25",
-        "total_results": len(result["bm25_ids"]),
-        "top_100_count": len(bm25_top100_ids),
-        "results": get_jsons_by_ids(bm25_top100_ids)
+    # Add test metadata
+    output_data = {
+        "test_metadata": {
+            "timestamp": kst_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+            "query_index": query_idx,
+            "k_value": k,
+            "original_query": original_query,
+        },
+        "api_response": api_response_clean
     }
-    bm25_filename = f"query{query_idx}_k{k}_bm25.json"
-    with open(os.path.join(OUTPUT_DIR, bm25_filename), 'w', encoding='utf-8') as f:
-        json.dump(bm25_data, f, ensure_ascii=False, indent=2)
-    print(f"    → Saved: {bm25_filename}")
 
-    # Save Vector top 100 results
-    vector_top100_ids = result["vector_ids"][:100]
-    vector_data = {
-        **metadata,
-        "search_type": "Vector",
-        "total_results": len(result["vector_ids"]),
-        "top_100_count": len(vector_top100_ids),
-        "results": get_jsons_by_ids(vector_top100_ids)
-    }
-    vector_filename = f"query{query_idx}_k{k}_vector.json"
-    with open(os.path.join(OUTPUT_DIR, vector_filename), 'w', encoding='utf-8') as f:
-        json.dump(vector_data, f, ensure_ascii=False, indent=2)
-    print(f"    → Saved: {vector_filename}")
+    # Save to file
+    filename = f"query{query_idx}_k{k}_result.json"
+    filepath = os.path.join(OUTPUT_DIR, filename)
 
-    # Save RRF top 100 results
-    rrf_top100_ids = result["rrf_ids"][:100]
-    rrf_data = {
-        **metadata,
-        "search_type": "RRF",
-        "total_results": len(result["rrf_ids"]),
-        "top_100_count": len(rrf_top100_ids),
-        "results": get_jsons_by_ids(rrf_top100_ids)
-    }
-    rrf_filename = f"query{query_idx}_k{k}_rrf.json"
-    with open(os.path.join(OUTPUT_DIR, rrf_filename), 'w', encoding='utf-8') as f:
-        json.dump(rrf_data, f, ensure_ascii=False, indent=2)
-    print(f"    → Saved: {rrf_filename}")
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+
+    return filename
 
 
 def run_tests():
     """Run all test combinations and save results."""
     print("=" * 80)
-    print("RRF k-value Performance Testing")
+    print("RRF API Testing")
     print("=" * 80)
+    print(f"API Endpoint: {API_URL}")
     print(f"Test queries: {len(TEST_QUERIES)}")
     print(f"K values: {K_VALUES}")
     print(f"Total experiments: {len(TEST_QUERIES) * len(K_VALUES)}")
@@ -181,8 +134,6 @@ def run_tests():
 
     total_tests = len(TEST_QUERIES) * len(K_VALUES)
     completed = 0
-
-    # 전체 테스트 결과를 저장할 리스트
     all_results = []
     test_start_time = time.time()
 
@@ -195,43 +146,54 @@ def run_tests():
 
             try:
                 start_time = time.time()
-                result = perform_search(query, k)
+
+                # Call API endpoint
+                api_response = call_search_api(query, count=150, k=k)
+
                 elapsed_time = time.time() - start_time
 
-                save_results(query_idx, k, query, result)
+                # Save results
+                filename = save_results(query_idx, k, query, api_response)
 
-                # Print summary
-                bm25_count = len(result.get("bm25_ids", []))
-                vector_count = len(result.get("vector_ids", []))
-                rrf_count = len(result.get("rrf_ids", []))
+                # Extract summary info
+                result_count = len(api_response.get("result", []))
+                metrics = api_response.get("metrics", {})
 
-                print(f"    ✓ BM25: {bm25_count}개, Vector: {vector_count}개, RRF: {rrf_count}개")
-                print(f"    ✓ 소요시간: {elapsed_time:.2f}s")
+                print(f"    ✓ Results: {result_count}개")
+                print(f"    ✓ API Time: {metrics.get('total_time', 'N/A')}")
+                print(f"    ✓ Saved: {filename}")
 
-                # 결과 수집
+                # Collect summary
                 all_results.append({
                     "query_index": query_idx,
                     "original_query": query,
-                    "clean_query": result.get("clean_query", ""),
+                    "clean_query": api_response.get("clean_query", ""),
                     "k_value": k,
-                    "bm25_count": bm25_count,
-                    "vector_count": vector_count,
-                    "rrf_count": rrf_count,
-                    "elapsed_time": f"{elapsed_time:.2f}s",
-                    "status": "success"
+                    "result_count": result_count,
+                    "api_time": metrics.get('total_time', 'N/A'),
+                    "total_elapsed": f"{elapsed_time:.2f}s",
+                    "status": "success",
+                    "filename": filename
                 })
 
-                # 마지막 테스트가 아니면 60초(1분) 대기
+                # Wait between tests (except for the last one)
                 if completed < total_tests:
-                    print(f"  ⏳ 다음 테스트까지 60초(1분) 대기 중...")
-                    time.sleep(60)
+                    wait_time = 30
+                    print(f"  ⏳ Waiting {wait_time}s before next test...")
+                    time.sleep(wait_time)
 
+            except requests.exceptions.RequestException as e:
+                print(f"    ✗ API Error: {e}")
+                all_results.append({
+                    "query_index": query_idx,
+                    "original_query": query,
+                    "k_value": k,
+                    "status": "failed",
+                    "error": str(e)
+                })
+                continue
             except Exception as e:
-                print(f"    ✗ Failed: {e}")
-                import traceback
-                traceback.print_exc()
-
-                # 실패한 결과도 기록
+                print(f"    ✗ Error: {e}")
                 all_results.append({
                     "query_index": query_idx,
                     "original_query": query,
@@ -241,14 +203,15 @@ def run_tests():
                 })
                 continue
 
-    # 전체 테스트 소요 시간
+    # Calculate total test time
     total_elapsed_time = time.time() - test_start_time
 
-    # 최종 결과 요약 저장
+    # Save summary report
     kst_time = datetime.now(ZoneInfo("Asia/Seoul"))
     summary = {
         "test_info": {
             "timestamp": kst_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+            "api_endpoint": API_URL,
             "total_queries": len(TEST_QUERIES),
             "k_values": K_VALUES,
             "total_experiments": total_tests,
@@ -261,12 +224,16 @@ def run_tests():
     }
 
     summary_filename = f"test_summary_{kst_time.strftime('%Y%m%d_%H%M%S')}.json"
-    with open(os.path.join(OUTPUT_DIR, summary_filename), 'w', encoding='utf-8') as f:
+    summary_filepath = os.path.join(OUTPUT_DIR, summary_filename)
+
+    with open(summary_filepath, 'w', encoding='utf-8') as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     print("\n" + "=" * 80)
     print(f"Testing complete! Results saved to {OUTPUT_DIR}/")
-    print(f"Summary saved: {summary_filename}")
+    print(f"Summary: {summary_filename}")
+    print(f"Success: {summary['test_info']['completed_experiments']}/{total_tests}")
+    print(f"Failed: {summary['test_info']['failed_experiments']}/{total_tests}")
     print("=" * 80)
 
 

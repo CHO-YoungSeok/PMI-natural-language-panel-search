@@ -20,6 +20,7 @@ import sys
 import os
 import pickle
 import time
+import json
 from typing import List, Tuple
 
 # 현재 디렉토리의 db_search 모듈 임포트
@@ -100,9 +101,32 @@ def build_bm25_index(batch_size==100) -> Tuple:
             if not batch:
                 break
 
-            # 배치 처리
-            for doc_id, text in batch:
-                tokens = preprocess_text(text)
+            # 배치 처리 (JSON 강화 인덱싱)
+            for doc_id, info_text in batch:
+                # JSON 파싱하여 키-값 쌍을 명시적으로 텍스트화
+                try:
+                    # JSON 문자열인 경우 파싱
+                    info_dict = json.loads(info_text) if isinstance(info_text, str) else info_text
+
+                    # JSON을 "키: 값" 형태의 평문으로 변환
+                    # 예: {"OTT구독": "Netflix"} → "OTT구독: Netflix"
+                    text_parts = []
+                    for key, value in info_dict.items():
+                        if value:  # 빈 값 제외
+                            # 값이 리스트나 딕셔너리인 경우 문자열로 변환
+                            if isinstance(value, (list, dict)):
+                                value = str(value)
+                            text_parts.append(f"{key}: {value}")
+
+                    # 모든 키-값 쌍을 공백으로 연결
+                    enriched_text = " ".join(text_parts)
+
+                    # 강화된 텍스트로 전처리
+                    tokens = preprocess_text(enriched_text)
+
+                except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                    # JSON 파싱 실패 시 원본 텍스트 사용
+                    tokens = preprocess_text(info_text if isinstance(info_text, str) else str(info_text))
 
                 if tokens:
                     tokenized_docs.append(tokens)

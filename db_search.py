@@ -33,6 +33,16 @@ def get_vector_db_conn():
 # Kiwi 초기화 (전역으로 한 번만 생성)
 kiwi = Kiwi()
 
+# 도메인 특화 사용자 사전 추가 (복합명사를 단일 토큰으로 인식)
+# 음용경험/OTT 검색 정확도 향상을 위한 핵심 키워드
+core_keywords = [
+    'OTT', 'OTT구독', 'OTT서비스',
+    '음용경험', '음주경험'
+]
+
+for keyword in core_keywords:
+    kiwi.add_user_word(keyword, 'NNG', 1.0)  # 일반명사로 등록, 높은 우선순위
+
 # 불용어 설정
 stopwords = Stopwords()
 
@@ -48,6 +58,74 @@ custom_stopwords = [
 
 for word, pos in custom_stopwords:
     stopwords.add((word, pos))
+
+
+# 한국 17개 광역시도 리스트 (거주지역 필터링용)
+REGIONS = [
+    "서울", "경기", "인천", "부산", "대구", "대전", "광주", "울산", "세종",
+    "강원", "충북", "충남", "전북", "전남", "경북", "경남", "제주"
+]
+
+
+def extract_regions_from_query(query: str) -> Optional[List[str]]:
+    """
+    쿼리에서 거주지역 키워드 추출 (키워드 매칭 방식)
+
+    Args:
+        query: 전처리된 검색 쿼리 (clean_query)
+
+    Returns:
+        Optional[List[str]]: 발견된 지역 리스트 또는 None (지역 미언급 시)
+
+    Example:
+        >>> extract_regions_from_query("서울 및 경기 20대")
+        ['서울', '경기']
+        >>> extract_regions_from_query("OTT 이용자 100명")
+        None
+    """
+    if not query:
+        return None
+
+    found_regions = []
+    for region in REGIONS:
+        if region in query:
+            found_regions.append(region)
+
+    return found_regions if found_regions else None
+
+
+def extract_gender_from_query(query: str) -> Optional[List[str]]:
+    """
+    쿼리에서 성별 키워드 추출 (키워드 매칭 방식, DB 값으로 정규화)
+
+    Args:
+        query: 전처리된 검색 쿼리 (clean_query)
+
+    Returns:
+        Optional[List[str]]: 발견된 성별 리스트 (DB 값: "남자", "여자") 또는 None
+
+    Example:
+        >>> extract_gender_from_query("서울 20대 남성")
+        ['남자']
+        >>> extract_gender_from_query("경기 여성 및 남성")
+        ['여자', '남자']
+        >>> extract_gender_from_query("서울 20대")
+        None
+    """
+    if not query:
+        return None
+
+    found_genders = []
+
+    # "남성", "남자" → "남자" (DB 값으로 정규화)
+    if any(keyword in query for keyword in ["남성", "남자"]):
+        found_genders.append("남자")
+
+    # "여성", "여자" → "여자" (DB 값으로 정규화)
+    if any(keyword in query for keyword in ["여성", "여자"]):
+        found_genders.append("여자")
+
+    return found_genders if found_genders else None
 
 
 def preprocess_text(text: str) -> List[str]:
@@ -145,17 +223,117 @@ def filter_by_birth_years(ids: list, birth_years_str: Optional[str]) -> List[str
         conn.close()
 
 
-def bm25_search(query: str, top_k: int = 100, birth_years: Optional[str] = None) -> List[str]:
+def filter_by_regions(ids: List[str], regions: Optional[List[str]]) -> List[str]:
     """
-    BM25 기반 검색 (전처리 강화, 캐시 사용, 출생년도 필터링)
+    패널 ID 리스트를 거주지역으로 필터링 (OR 조건)
+
+    Args:
+        ids: 필터링할 패널 ID 리스트
+        regions: 거주지역 리스트 (예: ["서울", "경기"]) 또는 None (필터링 안함)
+
+    Returns:
+        필터링된 ID 리스트 (regions가 None이면 원본 리스트 반환)
+
+    Example:
+        >>> filter_by_regions(['w001', 'w002', 'w003'], ['서울', '경기'])
+        ['w001', 'w003']  # 서울 또는 경기 거주자만
+    """
+    if regions is None or not ids:
+        return ids
+
+    conn = get_json_db_conn()
+    cur = conn.cursor()
+
+    try:
+        # info_text JSON에서 '거주지역' 필드를 추출하여 필터링 (OR 조건: ANY)
+        sql = """
+            SELECT id
+            FROM wellcome1st_json_data
+            WHERE id = ANY(%s)
+            AND (info_text::jsonb->>'거주지역') = ANY(%s)
+        """
+        cur.execute(sql, (ids, regions))
+        filtered_ids = [r[0] for r in cur.fetchall()]
+
+        print(f"거주지역 필터링: {len(ids)}개 → {len(filtered_ids)}개 (지역: {regions})")
+
+        return filtered_ids
+
+    except Exception as e:
+        print(f"✗ 거주지역 필터링 실패: {e}")
+        # 필터링 실패 시 원본 리스트 반환
+        return ids
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def filter_by_gender(ids: List[str], genders: Optional[List[str]]) -> List[str]:
+    """
+    패널 ID 리스트를 성별로 필터링 (OR 조건)
+
+    Args:
+        ids: 필터링할 패널 ID 리스트
+        genders: 성별 리스트 (예: ["남자"], ["여자"], ["남자", "여자"]) 또는 None (필터링 안함)
+
+    Returns:
+        필터링된 ID 리스트 (genders가 None이면 원본 리스트 반환)
+
+    Example:
+        >>> filter_by_gender(['w001', 'w002', 'w003'], ['남자'])
+        ['w001', 'w003']  # 남자만
+    """
+    if genders is None or not ids:
+        return ids
+
+    conn = get_json_db_conn()
+    cur = conn.cursor()
+
+    try:
+        # info_text JSON에서 '성별' 필드를 추출하여 필터링 (OR 조건: ANY)
+        sql = """
+            SELECT id
+            FROM wellcome1st_json_data
+            WHERE id = ANY(%s)
+            AND (info_text::jsonb->>'성별') = ANY(%s)
+        """
+        cur.execute(sql, (ids, genders))
+        filtered_ids = [r[0] for r in cur.fetchall()]
+
+        print(f"성별 필터링: {len(ids)}개 → {len(filtered_ids)}개 (성별: {genders})")
+
+        return filtered_ids
+
+    except Exception as e:
+        print(f"✗ 성별 필터링 실패: {e}")
+        # 필터링 실패 시 원본 리스트 반환
+        return ids
+
+    finally:
+        cur.close()
+        conn.close()
+
+
+def bm25_search(
+    query: str,
+    top_k: int = 100,
+    birth_years: Optional[str] = None,
+    regions: Optional[List[str]] = None,
+    genders: Optional[List[str]] = None
+) -> List[str]:
+    """
+    BM25 기반 검색 (전처리 강화, 캐시 사용, 다중 필터링)
 
     Args:
         query: 검색 쿼리 (자연어 문장)
         top_k: 반환할 최대 결과 개수
         birth_years: 공백으로 구분된 출생년도 문자열 (옵션)
+        regions: 거주지역 리스트 (예: ["서울", "경기"]) (옵션)
+        genders: 성별 리스트 (예: ["남자"], ["여자"]) (옵션)
 
     Returns:
-        List[str]: 관련도 높은 순으로 정렬된 ID 리스트 (출생년도 필터링 적용)
+        List[str]: 관련도 높은 순으로 정렬된 ID 리스트 (모든 필터링 적용)
     """
     # 캐시된 인덱스 파일에서 로드
     cache_file = 'bm25_index.pkl'
@@ -202,21 +380,37 @@ def bm25_search(query: str, top_k: int = 100, birth_years: Optional[str] = None)
     if birth_years is not None:
         results = filter_by_birth_years(results, birth_years)
 
+    # 거주지역 필터링 적용
+    if regions is not None:
+        results = filter_by_regions(results, regions)
+
+    # 성별 필터링 적용
+    if genders is not None:
+        results = filter_by_gender(results, genders)
+
     return results
 
 
 
-def vector_search(query_vec: list, top_k: int = 100, birth_years: Optional[str] = None) -> List[str]:
+def vector_search(
+    query_vec: list,
+    top_k: int = 100,
+    birth_years: Optional[str] = None,
+    regions: Optional[List[str]] = None,
+    genders: Optional[List[str]] = None
+) -> List[str]:
     """
-    wellcome1st_vector_data 테이블에서 벡터 유사도 기반 검색 (출생년도 필터링 지원)
+    wellcome1st_vector_data 테이블에서 벡터 유사도 기반 검색 (다중 필터링 지원)
 
     Args:
         query_vec: 쿼리 임베딩 벡터
         top_k: 반환할 최대 결과 개수
         birth_years: 공백으로 구분된 출생년도 문자열 (옵션)
+        regions: 거주지역 리스트 (예: ["서울", "경기"]) (옵션)
+        genders: 성별 리스트 (예: ["남자"], ["여자"]) (옵션)
 
     Returns:
-        List[str]: 유사도 높은 순으로 정렬된 ID 리스트 (출생년도 필터링 적용)
+        List[str]: 유사도 높은 순으로 정렬된 ID 리스트 (모든 필터링 적용)
     """
     conn = get_vector_db_conn()
     cur = conn.cursor()
@@ -225,18 +419,39 @@ def vector_search(query_vec: list, top_k: int = 100, birth_years: Optional[str] 
         if not isinstance(query_vec, np.ndarray):
             query_vec = np.array(query_vec)
 
-        if birth_years is not None:
-            # 출생년도 필터링: JOIN으로 한 번에 처리
-            birth_year_list = birth_years.split()
-            sql = """
+        # 필터가 하나라도 있으면 JOIN 사용
+        has_filters = birth_years is not None or regions is not None or genders is not None
+
+        if has_filters:
+            # 동적으로 WHERE 조건 구성
+            where_conditions = []
+            params = [query_vec]
+
+            if birth_years is not None:
+                birth_year_list = birth_years.split()
+                where_conditions.append("(j.info_text::jsonb->>'출생년도') = ANY(%s)")
+                params.append(birth_year_list)
+
+            if regions is not None:
+                where_conditions.append("(j.info_text::jsonb->>'거주지역') = ANY(%s)")
+                params.append(regions)
+
+            if genders is not None:
+                where_conditions.append("(j.info_text::jsonb->>'성별') = ANY(%s)")
+                params.append(genders)
+
+            where_clause = " AND ".join(where_conditions)
+            params.append(top_k)
+
+            sql = f"""
                 SELECT v.fk_id, v.embedding <=> %s AS distance
                 FROM wellcome1st_vector_data v
                 JOIN wellcome1st_json_data j ON v.fk_id = j.id
-                WHERE (j.info_text::jsonb->>'출생년도') = ANY(%s)
+                WHERE {where_clause}
                 ORDER BY distance ASC
                 LIMIT %s
             """
-            cur.execute(sql, (query_vec, birth_year_list, top_k))
+            cur.execute(sql, params)
         else:
             # 필터링 없음: 기존 로직
             sql = """
@@ -283,6 +498,80 @@ def get_jsons_by_ids(ids: list):
         results = [{"id": r[0], "info_text": r[1]} for r in cur.fetchall()]
         return results
 
+    finally:
+        cur.close()
+        conn.close()
+
+
+def has_field_info(ids: List[str], field_keywords: List[str]) -> List[str]:
+    """
+    정확한 JSON 필드 키 매칭으로 도메인 필터링
+
+    Changes from previous version:
+    - LIKE '%keyword%' → Exact match using jsonb ? operator
+    - Supports multiple exact keys per domain (OR condition)
+    - More reliable: only matches exact question keys from DB
+
+    Args:
+        ids: Panel ID list to filter
+        field_keywords: Exact JSONB key strings (e.g., "여러분이 현재 이용 중인 OTT 서비스는 몇 개인가요?")
+
+    Returns:
+        Filtered panel IDs that have at least one of the specified keys with non-null, non-empty values
+
+    Example:
+        >>> ids = ['w001', 'w002', 'w003']
+        >>> has_field_info(ids, ['여러분이 현재 이용 중인 OTT 서비스는 몇 개인가요?'])
+        ['w001', 'w003']  # Only panels with exact OTT field
+    """
+    if not ids or not field_keywords:
+        return ids
+
+    conn = get_json_db_conn()
+    cur = conn.cursor()
+
+    try:
+        # Build OR condition for multiple exact keys
+        # Each keyword is an exact key string, not a substring to match
+        conditions = []
+        for exact_key in field_keywords:
+            conditions.append(f"""
+                (
+                    (info_text::jsonb ? %s)
+                    AND (info_text::jsonb->>%s) IS NOT NULL
+                    AND (info_text::jsonb->>%s) != ''
+                )
+            """)
+
+        where_clause = " OR ".join(conditions)
+
+        # Flatten the parameter list: each exact_key appears 3 times in the query
+        params = [ids]
+        for exact_key in field_keywords:
+            params.extend([exact_key, exact_key, exact_key])
+
+        sql = f"""
+            SELECT id
+            FROM wellcome1st_json_data
+            WHERE id = ANY(%s)
+            AND ({where_clause})
+        """
+        cur.execute(sql, params)
+        filtered_ids = [r[0] for r in cur.fetchall()]
+
+        # Enhanced logging
+        print(f"[도메인 필터] 정확한 키 매칭 모드")
+        print(f"[도메인 필터] 검색 키: {field_keywords}")
+        print(f"[도메인 필터] 입력: {len(ids)}개 → 출력: {len(filtered_ids)}개")
+        if len(ids) > 0:
+            print(f"[도메인 필터] 필터링 비율: {len(filtered_ids)/len(ids)*100:.1f}%")
+
+        return filtered_ids
+
+    except Exception as e:
+        print(f"✗ 도메인 필터링 실패: {e}")
+        # Return original list on failure
+        return ids
     finally:
         cur.close()
         conn.close()

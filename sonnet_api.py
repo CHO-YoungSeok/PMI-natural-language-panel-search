@@ -97,6 +97,7 @@ def preprocess_query(query: str) -> Tuple[str, int, Optional[str]]:
 - 영어, 한자, 접두사 형태('비', '불', '무', '미', 'non', '非')는 부정적 자연어로 풀어쓰기
 - "술"은 "음용경험"으로 표현
 - 젊은층은 출생년도로 해석 (20대~30대, 노년층은 60대 이상)
+- 남성은 남자로, 여성은 여자로 표현
 - 전처리된 검색용 문장만 출력 (설명, 해석 X)
 
 ## 예시:
@@ -111,6 +112,9 @@ def preprocess_query(query: str) -> Tuple[str, int, Optional[str]]:
             messages=[{"role": "user", "content": f"원본 쿼리: {q}를 조건에 맞게 전처리해"}]
         )
         return clean_message.content[0].text.strip()
+
+
+
 
     # 병렬 실행 (3개 작업)
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -251,7 +255,7 @@ def llm_filter_panel(query: str, jsons: list) -> str:
         return ""
     
     system_prompt = """
-You are an expert panel ranking AI. Your task is to select and rank survey panels based on their relevance to a search query.
+You are an expert panel ranking AI. Your task is to select and rank survey panels based on their relevance to a search query with MAXIMUM ACCURACY.
 
 # Input Format
 Each panel has:
@@ -260,67 +264,97 @@ Each panel has:
 
 # Your Task
 
-## CRITICAL: Absolute Location Filtering
-**This is the HIGHEST priority rule - override all other scoring:**
+## STEP 1: CRITICAL MANDATORY FILTERING (DISQUALIFICATION RULES)
+**Apply these rules FIRST - panels that fail ANY rule get score = -9999 (DISQUALIFIED)**
 
-1. Extract location criteria from query (e.g., "서울", "경기", "부산", "인천", etc.)
-2. For EACH panel:
-   - Check if panel's location field in `info` matches the query's location requirement
-   - Location matching rules:
-     * Query mentions "서울" → ONLY accept panels with "서울" in location field
-     * Query mentions "경기" → ONLY accept panels with "경기" in location field
-     * Query mentions "인천" → ONLY accept panels with "인천" in location field
-     * Partial matches NOT allowed (e.g., "경기" ≠ "서울", "인천" ≠ "서울")
-   - If location DOES NOT match: IMMEDIATELY assign score = -9999 (disqualified)
-   - If location matches OR no location specified in query: proceed with normal scoring
+### Rule 1: Negative Condition Filtering (Priority)
+**Identify usage/behavioral constraints:**
+- Query "이용하지 않는/안 함/없음" → Panel must confirm NON-usage.
+- Query "이용하는/함" → Panel must confirm usage.
+- Ambiguous or contradictory answers → DISQUALIFIED.
 
-3. Examples:
-   - Query: "서울에 거주하는 20대"
-     * Panel location "서울" → Proceed with normal scoring ✓
-     * Panel location "경기" → score = -9999 (DISQUALIFIED) ✗
-     * Panel location "인천" → score = -9999 (DISQUALIFIED) ✗
-   - Query: "경기 30대 남성"
-     * Panel location "경기" → Proceed with normal scoring ✓
-     * Panel location "서울" → score = -9999 (DISQUALIFIED) ✗
+### Rule 2: Numeric & Income Range Filtering (CRITICAL ACCURACY)
+**You must treat income/age/money as MATHEMATICAL VALUES, not text.**
 
-**This location filtering rule applies BEFORE any other scoring criteria.**
+#### 2.1 Logic for "Greater Than / Over" (이상, 초과)
+- **Query:** "월 소득 X원 이상" / "X원 초과" (e.g., "1,000만원 이상")
+- **Logic:** 
+  1. Extract target number X from query (Normalize "1,000" → 1000).
+  2. Parse panel's range [Min, Max].
+  3. **DISQUALIFY if Panel Max < X**.
+  4. **DISQUALIFY if Panel Range is "Below X" (e.g., "X 미만")**.
 
-## Standard Scoring (applied AFTER location filtering)
+**Specific Examples for Query: "월 소득 1,000만원 이상" (Target ≥ 1000)**
 
-1. Analyze the search query to extract:
-   - Target criteria (location, age, gender, behaviors, etc.)
-   - Required count N (e.g., "20명" = 20, "100명" = 100, "30명" = 30)
+❌ **DISQUALIFIED (Score = -9999):**
+- "200~300만원" (Max 300 < 1000) → FAIL
+- "400~500만원" (Max 500 < 1000) → FAIL
+- "500~1,000만원 미만" (Range is < 1000. The word "미만" means strictly less than) → FAIL
+- "700~1,000만원 미만" → FAIL
+- "소득 없음" → FAIL
 
-2. Score each panel (only if not disqualified by location):
-   - Start with 50 points (neutral)
-   - +10 points: Panel perfectly matches a critical criterion (age, gender)
-   - +5 points: Panel matches a secondary criterion (behavior, preference)
-   - -100 points: Panel directly contradicts a criterion (e.g., query wants "male" but panel is "female")
-   - -10 points: Panel contradicts a secondary criterion
-   - Ignore the `id` field for matching - only use `info` values
+✅ **QUALIFIED:**
+- "1,000만원 이상" (Min 1000 ≥ 1000) → PASS
+- "1,500만원 이상" → PASS
+- "2,000만원 이상" → PASS
 
-3. Rank ALL panels by score (highest first, disqualified panels at bottom)
+#### 2.2 Logic for "Less Than / Under" (이하, 미만)
+- **Query:** "월 소득 X원 미만" / "이하"
+- **Logic:** DISQUALIFY if Panel Min ≥ X.
 
-4. **ABSOLUTE COUNT REQUIREMENT**:
-   - Extract requested count N from query (e.g., "100명" → N=100)
-   - After scoring ALL panels (including disqualified ones):
-     * Sort by score (highest first)
-     * Select top N panels
-   - You MUST return EXACTLY N panel IDs
+**Specific Examples for Query: "월 소득 300만원 미만" (Target < 300)**
+
+❌ **DISQUALIFIED (Score = -9999):**
+- "300~400만원" (Start at 300) → FAIL
+- "400~500만원" → FAIL
+- "300만원 이상" → FAIL
+
+✅ **QUALIFIED:**
+- "200만원 미만" → PASS
+- "200~300만원 미만" → PASS
+
+#### 2.3 Handling Units & Formats
+- Treat "1,000" and "1000" as identical.
+- Ignore "만원", "원" text when comparing numbers.
+- Be careful with "미만" (Under) vs "이하" (Equal or Under).
+- **Strictly check boundaries:** "1000만원 미만" DOES NOT satisfy "1000만원 이상".
+
+### Rule 3: Explicit Exclusions
+- If query says "A 제외", panels matching A → score = -9999
+
+**After Step 1: Only panels with score ≠ -9999 proceed to Step 2**
+
+## STEP 2: Standard Scoring (ONLY for non-disqualified panels)
+
+1. **Score each qualified panel:**
+   - Start: 50 points (neutral baseline)
+   - **Perfect match on behavioral criterion:** +15 points
+   - **Match on secondary preference:** +5 points
+   - **DO NOT apply disqualification scores here** (already handled in Step 1)
+
+2. **Rank ALL panels by score:**
+   - Sort: highest score first, disqualified panels (-9999) at bottom
+
+3. **ABSOLUTE COUNT REQUIREMENT:**
+   - Extract N from query (e.g., "100명" → N=100)
+   - Select top N panels from sorted list
+   - Return EXACTLY N panel IDs
    - ONLY exception: if total candidates < N, return ALL candidates
-   - Even if top N includes low/negative scores, still return them
-   - If the query asks for "30명", return EXACTLY 30 panel IDs
-   - If the query asks for "100명", return EXACTLY 100 panel IDs
 
-# CRITICAL OUTPUT REQUIREMENTS
-- You MUST output ONLY space-separated IDs inside <result> tags
+## CRITICAL OUTPUT REQUIREMENTS
+- Output ONLY space-separated IDs inside <result> tags
 - Format: <result>w10001 w10023 w10087</result>
-- ABSOLUTELY NO other text, explanations, numbers, labels, punctuation, or line breaks inside <result> tags
-- Only IDs separated by single spaces
-- Return EXACTLY N IDs (the number requested in the query)
+- NO other text inside <result>
+- Return EXACTLY N IDs
 
-Example for "30명" query:
-<result>w10001 w10023 w10087 w10045 w10099 w10123 w10145 w10167 w10189 w10201 w10223 w10245 w10267 w10289 w10301 w10323 w10345 w10367 w10389 w10401 w10423 w10445 w10467 w10489 w10501 w10523 w10545 w10567 w10589 w10601</result>
+## Processing Checklist (Internal):
+1. ✓ Is this a numeric range query? (Income, Age)
+2. ✓ Convert Query Target to Number (e.g., 1,000 → 1000)
+3. ✓ Parse Panel Range Max/Min (e.g., "200~300" → Max 300)
+4. ✓ Compare mathematically: Is 300 >= 1000? False. → DISQUALIFY.
+5. ✓ Check "미만" (strictly less) vs "이상" (greater or equal) carefully.
+
+Then output ONLY the <result> tags with IDs.
 """
 
     user_prompt = f"""Search Query: {query}
@@ -328,8 +362,13 @@ Example for "30명" query:
 Candidate Panels (Total: {len(jsons)} panels):
 {json.dumps(jsons, ensure_ascii=False, indent=2)}
 
-Select the most relevant panels and output ONLY their IDs in this exact format.
-Remember: Return EXACTLY the number of panels requested in the query.
+**CRITICAL INSTRUCTIONS:**
+1. Apply Rule 2 (Numeric Filtering) STRICTLY for income ranges.
+2. "1,000만원 이상" requires the panel to be explicitly in the high-income bracket.
+3. DISQUALIFY any range that is completely below the target (e.g., "400~500" is NOT "1000 이상").
+4. DISQUALIFY "X 미만" ranges if the query asks for "X 이상".
+
+Output format (IDs only, no extra text):
 <result>w10001 w10023 w10087</result>
 """
 
@@ -346,18 +385,14 @@ Remember: Return EXACTLY the number of panels requested in the query.
 
         raw_content = message.content[0].text
 
-        # 정규표현식으로 <result> 태그 안의 내용만 추출
         match = re.search(r'<result>(.*?)</result>', raw_content, re.DOTALL)
         if match:
             return match.group(1).strip()
         else:
-            # 태그가 없을 경우(예외적 상황) 전체 텍스트에서 공백 정리 후 반환 시도
             return raw_content.strip()
 
     except RateLimitError:
-        # Re-raise to trigger retry decorator
         raise
     except Exception as e:
-        # Log other errors and return empty string
         print(f"LLM Error: {e}")
         return ""
