@@ -324,7 +324,11 @@ def search_pipeline(item: QueryItem):
             "final_count": len(answers)
         }
     }
-    
+
+
+
+app.mount('/home', StaticFiles(directory='build', html=True), name='static')
+
 @app.get("/")
 def root():
     return {"message": "RRF Search API with Sonnet running (Multi-threaded)"}

@@ -1,6 +1,7 @@
 .env
 CLAUDE.md
 testResult/
+build
 
 db_search_structured.py
 query_vectorizer_structured.py
