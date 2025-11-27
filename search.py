@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import concurrent.futures
 from io import StringIO
 from contextlib import redirect_stdout
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
@@ -326,8 +327,13 @@ def search_pipeline(item: QueryItem):
     }
 
 
+@app.get("/api/status")
+def status():
+    return {"message": "API running"}
 
-app.mount('/home', StaticFiles(directory='build', html=True), name='static')
+# /home 하위에 React 앱 마운트
+app.mount("/", StaticFiles(directory="./build", html=True), name="home")
+
 
 @app.get("/")
 def root():
